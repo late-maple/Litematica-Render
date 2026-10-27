@@ -29,6 +29,7 @@ Thumbs.db
 # Local-only files (not tracked)
 AGENTS.md
 docs/
+test/
 
 # Superpowers SDD workspace
 .superpowers/
