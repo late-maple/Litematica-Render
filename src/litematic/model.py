@@ -8,6 +8,8 @@ import numpy as np
 
 
 class Vec3i(NamedTuple):
+    """A 3D integer vector (x, y, z)."""
+
     x: int
     y: int
     z: int
@@ -31,6 +33,8 @@ class BlockState:
 
 @dataclass(frozen=True)
 class LitematicMetadata:
+    """Schematic-level metadata from the Metadata compound."""
+
     name: str
     author: str
     description: str
@@ -62,6 +66,8 @@ class Entity:
 
 @dataclass(frozen=True)
 class Litematic:
+    """A parsed schematic: metadata plus named regions."""
+
     metadata: LitematicMetadata
     regions: dict[str, "Region"]
 
