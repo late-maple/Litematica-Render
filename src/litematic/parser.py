@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from types import MappingProxyType
-from typing import Callable, Mapping, cast
+from typing import Callable, Mapping, Optional
 
 import numpy as np
 
@@ -131,9 +131,20 @@ def _make_unpacker(
     return unpack
 
 
-def _read_only(value: object) -> object:
-    """Dicts become read-only mappings; other payloads pass through verbatim."""
-    return MappingProxyType(dict(value)) if isinstance(value, dict) else value
+def _parse_pending_ticks(
+    entries: object, field: str, where: str
+) -> Optional[tuple[Mapping[str, object], ...]]:
+    """Scheduled-tick compounds ({x, y, z, Time, Priority, Block|Fluid, SubTick})."""
+    if entries is None:
+        return None
+    if not isinstance(entries, list):
+        raise LitematicFormatError(f"{where}: {field} is not a list")
+    ticks = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise LitematicFormatError(f"{where}: {field} entry is not a compound")
+        ticks.append(MappingProxyType(dict(entry)))
+    return tuple(ticks)
 
 
 def _parse_block_entities(entries: object, where: str) -> tuple[BlockEntity, ...]:
@@ -206,13 +217,11 @@ def _parse_region(name: str, region: Mapping, source: str) -> Region:
         )
     block_entities = _parse_block_entities(region.get("TileEntities", []), where)
     entities = _parse_entities(region.get("Entities", []), where)
-    # pending payload shapes are not yet verified against real files;
-    # non-mapping payloads may pass through at runtime until they are
-    pending_states = cast(
-        "Mapping[str, object] | None", _read_only(region.get("PendingBlockStates"))
+    pending_block_ticks = _parse_pending_ticks(
+        region.get("PendingBlockTicks"), "PendingBlockTicks", where
     )
-    pending_counts = cast(
-        "Mapping[str, object] | None", _read_only(region.get("PendingBlockCounts"))
+    pending_fluid_ticks = _parse_pending_ticks(
+        region.get("PendingFluidTicks"), "PendingFluidTicks", where
     )
     return Region(
         name=name,
@@ -221,8 +230,8 @@ def _parse_region(name: str, region: Mapping, source: str) -> Region:
         palette=palette,
         block_entities=block_entities,
         entities=entities,
-        pending_states=pending_states,
-        pending_counts=pending_counts,
+        pending_block_ticks=pending_block_ticks,
+        pending_fluid_ticks=pending_fluid_ticks,
         packed_indices=packed,
         _unpack=_make_unpacker(packed, bits, size, where, len(palette)),
     )

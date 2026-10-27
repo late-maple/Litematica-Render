@@ -91,8 +91,9 @@ class Region:
 
     Block data is kept in packed form; `block_indices` materializes it on
     first access and caches the result until `release()`.
-    `pending_states`/`pending_counts` are the file's pending-block fields,
-    retained verbatim (semantics defined by the writing Litematica version).
+    `pending_block_ticks`/`pending_fluid_ticks` are sequences of scheduled-tick
+    compounds ({x, y, z, Time, Priority, Block or Fluid, SubTick}), retained
+    verbatim (semantics defined by the writing Litematica version).
     Not thread-safe.
     """
 
@@ -104,8 +105,8 @@ class Region:
         palette: Sequence[BlockState],
         block_entities: tuple[BlockEntity, ...],
         entities: tuple[Entity, ...],
-        pending_states: Optional[Mapping[str, object]],
-        pending_counts: Optional[Mapping[str, object]],
+        pending_block_ticks: Optional[tuple[Mapping[str, object], ...]],
+        pending_fluid_ticks: Optional[tuple[Mapping[str, object], ...]],
         packed_indices: np.ndarray,
         _unpack: Callable[[], np.ndarray],
     ) -> None:
@@ -115,8 +116,8 @@ class Region:
         self._palette = tuple(palette)
         self._block_entities = block_entities
         self._entities = entities
-        self._pending_states = pending_states
-        self._pending_counts = pending_counts
+        self._pending_block_ticks = pending_block_ticks
+        self._pending_fluid_ticks = pending_fluid_ticks
         packed_indices.flags.writeable = False
         self._packed_indices = packed_indices
         self._unpack = _unpack
@@ -153,14 +154,14 @@ class Region:
         return self._entities
 
     @property
-    def pending_states(self) -> Optional[Mapping[str, object]]:
-        """Pending-block states field, retained verbatim; may be absent."""
-        return self._pending_states
+    def pending_block_ticks(self) -> Optional[tuple[Mapping[str, object], ...]]:
+        """Scheduled block ticks, one compound per tick; None if absent."""
+        return self._pending_block_ticks
 
     @property
-    def pending_counts(self) -> Optional[Mapping[str, object]]:
-        """Pending-block counts field, retained verbatim; may be absent."""
-        return self._pending_counts
+    def pending_fluid_ticks(self) -> Optional[tuple[Mapping[str, object], ...]]:
+        """Scheduled fluid ticks, one compound per tick; None if absent."""
+        return self._pending_fluid_ticks
 
     @property
     def packed_indices(self) -> np.ndarray:

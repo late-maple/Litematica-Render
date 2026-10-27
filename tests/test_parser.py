@@ -142,20 +142,50 @@ def test_tile_entities_and_entities_envelopes():
     assert e.data["Health"] == 10.0
 
 
-def test_pending_fields_kept_verbatim():
+def test_pending_ticks_kept_verbatim():
+    block_tick = {
+        "x": 1,
+        "y": 64,
+        "z": 2,
+        "Time": 10,
+        "Priority": 3,
+        "Block": "minecraft:redstone_block",
+        "SubTick": 0,
+    }
+    fluid_tick = {
+        "x": 2,
+        "y": 65,
+        "z": 3,
+        "Time": 5,
+        "Priority": 0,
+        "Fluid": "minecraft:water",
+        "SubTick": 1,
+    }
     data = build_litematic_bytes(
-        [_region(pending_states={"Pending": 1}, pending_counts={"Count": 2})]
+        [
+            _region(
+                pending_block_ticks=[block_tick],
+                pending_fluid_ticks=[fluid_tick],
+            )
+        ]
     )
     region = loads(data).regions["Main"]
-    assert region.pending_states == {"Pending": 1}
-    assert region.pending_counts == {"Count": 2}
+    assert region.pending_block_ticks == (block_tick,)
+    assert region.pending_fluid_ticks == (fluid_tick,)
 
 
-def test_absent_pending_fields_are_none():
+def test_absent_pending_ticks_are_none():
     data = build_litematic_bytes([_region()])
     region = loads(data).regions["Main"]
-    assert region.pending_states is None
-    assert region.pending_counts is None
+    assert region.pending_block_ticks is None
+    assert region.pending_fluid_ticks is None
+
+
+def test_empty_pending_tick_list_is_empty_tuple():
+    # a present-but-empty list must stay distinct from an absent one
+    data = build_litematic_bytes([_region(pending_fluid_ticks=[])])
+    region = loads(data).regions["Main"]
+    assert region.pending_fluid_ticks == ()
 
 
 def test_unknown_root_fields_ignored():
@@ -251,6 +281,13 @@ def test_malformed_tile_entities_raises(tile_entities):
 def test_malformed_entities_raises(entities):
     with pytest.raises(LitematicFormatError):
         _load_root(regions=_region_with(Entities=entities))
+
+
+@pytest.mark.parametrize("field", ["PendingBlockTicks", "PendingFluidTicks"])
+@pytest.mark.parametrize("ticks", [{"x": 1}, ["not-a-compound"]])
+def test_malformed_pending_ticks_raises(field, ticks):
+    with pytest.raises(LitematicFormatError):
+        _load_root(regions=_region_with(**{field: ticks}))
 
 
 def test_block_states_wrong_dtype_fails_at_load():

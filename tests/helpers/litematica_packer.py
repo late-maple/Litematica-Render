@@ -40,7 +40,7 @@ def build_litematic_bytes(
 
     Each region dict: name, position, size, palette (list of (name, props)),
     indices_yzx OR packed (long array used verbatim), plus optional
-    tile_entities, entities, pending_states, pending_counts.
+    tile_entities, entities, pending_block_ticks, pending_fluid_ticks.
     Metadata is written verbatim from metadata_overrides (no invented fields),
     so tests control exactly which keys the file carries.
     """
@@ -71,10 +71,10 @@ def build_litematic_bytes(
             region["BlockStatePalette"] = palette_entries
         else:
             del region["BlockStates"]  # field-under-test absent, not merely empty
-        if "pending_states" in r:
-            region["PendingBlockStates"] = r["pending_states"]
-        if "pending_counts" in r:
-            region["PendingBlockCounts"] = r["pending_counts"]
+        if "pending_block_ticks" in r:
+            region["PendingBlockTicks"] = r["pending_block_ticks"]
+        if "pending_fluid_ticks" in r:
+            region["PendingFluidTicks"] = r["pending_fluid_ticks"]
         regions_nbt[r["name"]] = region
     root = {
         "MinecraftDataVersion": data_version,

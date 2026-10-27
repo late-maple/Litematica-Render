@@ -42,8 +42,8 @@ def _make_region(unpack, size=Vec3i(2, 3, 4), palette=None):
         palette=palette,
         block_entities=(),
         entities=(),
-        pending_states=None,
-        pending_counts=None,
+        pending_block_ticks=None,
+        pending_fluid_ticks=None,
         packed_indices=np.zeros(8, dtype=np.int64),
         _unpack=unpack,
     )
