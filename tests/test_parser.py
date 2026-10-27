@@ -189,7 +189,7 @@ REGION_NBT = {
 
 
 def _load_root(regions=None, metadata=None):
-    root: dict = {"DataVersion": 3337}
+    root: dict = {"MinecraftDataVersion": 3337}
     root["Regions"] = regions if regions is not None else {"Main": dict(REGION_NBT)}
     if metadata is not None:
         root["Metadata"] = metadata

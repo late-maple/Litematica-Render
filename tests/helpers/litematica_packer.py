@@ -76,7 +76,11 @@ def build_litematic_bytes(
         if "pending_counts" in r:
             region["PendingBlockCounts"] = r["pending_counts"]
         regions_nbt[r["name"]] = region
-    root = {"DataVersion": data_version, "Metadata": meta, "Regions": regions_nbt}
+    root = {
+        "MinecraftDataVersion": data_version,
+        "Metadata": meta,
+        "Regions": regions_nbt,
+    }
     if extra_root:
         root.update(extra_root)
     return write_nbt(root, gzip=gzip, root_name="Schematic")
