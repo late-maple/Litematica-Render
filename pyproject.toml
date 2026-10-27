@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "litematica-render"
+dynamic = ["version"]
+description = "Minecraft Litematica .litematic"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "mypy"]
+
+[tool.hatch.version]
+path = "src/litematic/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/litematic"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
