@@ -3,7 +3,13 @@
 import numpy as np
 import pytest
 
-from litematic.model import BlockState, Region, Vec3i
+from litematic.model import (
+    BlockState,
+    Litematic,
+    LitematicMetadata,
+    Region,
+    Vec3i,
+)
 
 
 def test_block_state_value_equality_and_hash():
@@ -102,3 +108,31 @@ def test_palette_is_immutable_snapshot():
     assert len(region.palette) == 2
     with pytest.raises(AttributeError):
         region.palette.append(BlockState("minecraft:tnt", {}))
+
+
+def test_indices_and_packed_read_only():
+    arr = np.zeros((2, 3, 4), dtype=np.uint16)
+    region = _make_region(lambda: arr)
+    with pytest.raises(ValueError):
+        region.block_indices[0, 0, 0] = 1
+    with pytest.raises(ValueError):
+        region.packed_indices[0] = 1
+
+
+def test_regions_mapping_read_only():
+    region = _make_region(lambda: np.zeros((2, 3, 4), dtype=np.uint16))
+    meta = LitematicMetadata("", "", "", Vec3i(0, 0, 0), 0, 0, 0, 0, 0)
+    schem = Litematic(metadata=meta, regions={"Main": region})
+    with pytest.raises(TypeError):
+        schem.regions["other"] = region
+
+
+def test_region_members_documented():
+    for member in (
+        "get_block",
+        "release",
+        "block_indices",
+        "is_unpacked",
+        "packed_indices",
+    ):
+        assert getattr(Region, member).__doc__, member

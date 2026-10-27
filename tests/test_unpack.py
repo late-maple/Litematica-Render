@@ -107,3 +107,7 @@ def test_unpack_peak_memory_bounded():
         y, rem = divmod(i, per_layer)
         z, x = divmod(rem, size.x)
         assert out[x, y, z] == vals[i]
+
+
+def test_bits_for_65536():
+    assert _bits_for(65536) == 16

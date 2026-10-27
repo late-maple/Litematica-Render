@@ -65,20 +65,27 @@ def _vec3(compound: Mapping, field: str, source: str) -> Vec3i:
         raise LitematicFormatError(f"{source}: missing or malformed {field}") from exc
 
 
+def _string(value: object, what: str, where: str) -> str:
+    if not isinstance(value, str):
+        raise LitematicFormatError(f"{where}: {what} is not a string")
+    return value
+
+
 def _parse_metadata(root: Mapping, source: str) -> LitematicMetadata:
     try:
         meta = root.get("Metadata") or {}
         if not isinstance(meta, dict):
             raise TypeError("Metadata is not a compound")
+        where = f"{source}: Metadata"
         size = meta.get("EnclosingSize")
         if size is None:
             enclosing = Vec3i(0, 0, 0)
         else:
             enclosing = Vec3i(int(size["x"]), int(size["y"]), int(size["z"]))
         return LitematicMetadata(
-            name=str(meta.get("Name", "")),
-            author=str(meta.get("Author", "")),
-            description=str(meta.get("Description", "")),
+            name=_string(meta.get("Name", ""), "Name", where),
+            author=_string(meta.get("Author", ""), "Author", where),
+            description=_string(meta.get("Description", ""), "Description", where),
             enclosing_size=enclosing,
             total_blocks=int(meta.get("TotalBlocks", 0)),
             total_volume=int(meta.get("TotalVolume", 0)),
@@ -97,7 +104,9 @@ def _parse_palette(entries: object, source: str) -> list[BlockState]:
     try:
         for entry in entries:
             props = entry.get("Properties") or {}
-            palette.append(BlockState(str(entry["Name"]), dict(props)))
+            palette.append(
+                BlockState(_string(entry["Name"], "Name", source), dict(props))
+            )
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise LitematicFormatError(f"{source}: malformed palette entry: {exc}") from exc
     return palette
@@ -136,7 +145,7 @@ def _parse_block_entities(entries: object, where: str) -> tuple[BlockEntity, ...
             out.append(
                 BlockEntity(
                     pos=(int(entry["x"]), int(entry["y"]), int(entry["z"])),
-                    id=str(entry.get("id", "")),
+                    id=_string(entry.get("id", ""), "id", where),
                     data=MappingProxyType(dict(entry)),
                 )
             )
@@ -156,7 +165,7 @@ def _parse_entities(entries: object, where: str) -> tuple[Entity, ...]:
             pos = entry["Pos"]
             out.append(
                 Entity(
-                    id=str(entry.get("id", "")),
+                    id=_string(entry.get("id", ""), "id", where),
                     pos=(float(pos[0]), float(pos[1]), float(pos[2])),
                     data=MappingProxyType(dict(entry)),
                 )
@@ -236,6 +245,10 @@ def parse_schematic(root: dict, source_name: str = "") -> Litematic:
 
 def loads(data: bytes) -> Litematic:
     """Parse .litematic bytes into a Litematic model."""
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise LitematicError(
+            f"loads() expects bytes-like input, got {type(data).__name__}"
+        )
     return parse_schematic(read_nbt(data), "<bytes>")
 
 

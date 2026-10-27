@@ -48,7 +48,11 @@ class LitematicMetadata:
 
 @dataclass(frozen=True)
 class BlockEntity:
-    """A tile entity: position, id, and its raw NBT payload as a plain mapping."""
+    """A tile entity: position, id, and its raw NBT payload as a plain mapping.
+
+    The mapping is read-only at the top level only; nested compounds
+    (a chest's items, for example) stay mutable dicts.
+    """
 
     pos: tuple[int, int, int]
     id: str
@@ -57,7 +61,11 @@ class BlockEntity:
 
 @dataclass(frozen=True)
 class Entity:
-    """An entity: id, position, and its raw NBT payload as a plain mapping."""
+    """An entity: id, position, and its raw NBT payload as a plain mapping.
+
+    The mapping is read-only at the top level only; nested compounds
+    stay mutable dicts.
+    """
 
     id: str
     pos: tuple[float, float, float]
@@ -66,10 +74,16 @@ class Entity:
 
 @dataclass(frozen=True)
 class Litematic:
-    """A parsed schematic: metadata plus named regions."""
+    """A parsed schematic: metadata plus named regions.
+
+    `regions` is exposed as a read-only mapping.
+    """
 
     metadata: LitematicMetadata
-    regions: dict[str, "Region"]
+    regions: Mapping[str, "Region"]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "regions", MappingProxyType(self.regions))
 
 
 class Region:
@@ -103,57 +117,76 @@ class Region:
         self._entities = entities
         self._pending_states = pending_states
         self._pending_counts = pending_counts
+        packed_indices.flags.writeable = False
         self._packed_indices = packed_indices
         self._unpack = _unpack
         self._indices: Optional[np.ndarray] = None
 
     @property
     def name(self) -> str:
+        """Region name as written in the file."""
         return self._name
 
     @property
     def position(self) -> Vec3i:
+        """Min corner in schematic coordinates (negative sizes normalized)."""
         return self._position
 
     @property
     def size(self) -> Vec3i:
+        """Region extents along x, y, z; always positive."""
         return self._size
 
     @property
     def palette(self) -> tuple[BlockState, ...]:
+        """Block states addressable by the values in `block_indices`."""
         return self._palette
 
     @property
     def block_entities(self) -> tuple[BlockEntity, ...]:
+        """Tile entities (chests, signs, spawners, ...) in this region."""
         return self._block_entities
 
     @property
     def entities(self) -> tuple[Entity, ...]:
+        """Entities (mobs, items, item frames, ...) in this region."""
         return self._entities
 
     @property
     def pending_states(self) -> Optional[Mapping[str, object]]:
+        """Pending-block states field, retained verbatim; may be absent."""
         return self._pending_states
 
     @property
     def pending_counts(self) -> Optional[Mapping[str, object]]:
+        """Pending-block counts field, retained verbatim; may be absent."""
         return self._pending_counts
 
     @property
     def packed_indices(self) -> np.ndarray:
+        """The raw packed BlockStates long array, read-only."""
         return self._packed_indices
 
     @property
     def is_unpacked(self) -> bool:
+        """Whether `block_indices` is currently materialized."""
         return self._indices is not None
 
     @property
     def block_indices(self) -> np.ndarray:
+        """Palette indices as a read-only (x, y, z) array; materializes lazily."""
         if self._indices is None:
-            self._indices = self._unpack()
+            indices = self._unpack()
+            indices.flags.writeable = False
+            self._indices = indices
         return self._indices
 
     def get_block(self, x: int, y: int, z: int) -> BlockState:
+        """Return the block state at local coordinates (x, y, z).
+
+        Out-of-range coordinates are a caller bug and raise IndexError;
+        file corruption raises LitematicFormatError on first unpack.
+        """
         size_x, size_y, size_z = self._size
         if not (0 <= x < size_x and 0 <= y < size_y and 0 <= z < size_z):
             raise IndexError(
@@ -164,4 +197,5 @@ class Region:
         return self._palette[index]
 
     def release(self) -> None:
+        """Drop the materialized `block_indices` cache to reclaim memory."""
         self._indices = None

@@ -274,3 +274,17 @@ def test_string_coordinates_raise():
         _load_root(
             regions=_region_with(Position={"x": "1.5", "y": 0, "z": 0})
         )
+
+
+def test_loads_rejects_str_input():
+    with pytest.raises(LitematicError):
+        loads("JUNK")
+
+
+def test_non_string_name_fields_raise():
+    with pytest.raises(LitematicFormatError):
+        _load_root(metadata={"Name": ["a"]})
+    with pytest.raises(LitematicFormatError):
+        _load_root(
+            regions=_region_with(BlockStatePalette=[{"Name": 123}])
+        )
