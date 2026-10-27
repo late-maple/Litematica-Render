@@ -127,7 +127,7 @@ def test_out_of_range_index_raises_on_access_with_region_name():
 
 def test_tile_entities_and_entities_envelopes():
     te = {"x": 1, "y": 2, "z": 3, "id": "minecraft:chest", "Custom": "stuff"}
-    ent = {"id": "minecraft:pig", "pos": [1.5, 2.0, 3.5], "Health": 10.0}
+    ent = {"id": "minecraft:pig", "Pos": [1.5, 2.0, 3.5], "Health": 10.0}
     data = build_litematic_bytes([_region(tile_entities=[te], entities=[ent])])
     region = loads(data).regions["Main"]
     assert len(region.block_entities) == 1
@@ -244,7 +244,7 @@ def test_malformed_tile_entities_raises(tile_entities):
     "entities",
     [
         [{"id": "minecraft:pig"}],  # missing pos
-        [{"id": "minecraft:pig", "pos": [1.0, 2.0]}],  # pos too short
+        [{"id": "minecraft:pig", "Pos": [1.0, 2.0]}],  # pos too short
         ["not-a-compound"],
     ],
 )

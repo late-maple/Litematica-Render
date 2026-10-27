@@ -149,7 +149,7 @@ def _parse_entities(entries: object, where: str) -> tuple[Entity, ...]:
     out = []
     for entry in entries:
         try:
-            pos = entry["pos"]
+            pos = entry["Pos"]
             out.append(
                 Entity(
                     id=str(entry.get("id", "")),
