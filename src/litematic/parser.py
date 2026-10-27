@@ -31,26 +31,30 @@ def _unpack_indices(packed: np.ndarray, bits: int, size: Vec3i) -> np.ndarray:
     from its low bit; an entry straddling a boundary continues into the low
     bits of the next long. File order is
     YZX: index = (y*lenZ + z)*lenX + x. Palettes wider than 16 bits need
-    uint32 output.
+    uint32 output. Entries are processed in fixed-size chunks so transient
+    memory stays a small multiple of the output array regardless of size.
     """
     count = size.x * size.y * size.z
     words = packed.view(np.uint64)  # logical shifts; int64 storage is untouched
-    positions = np.arange(count, dtype=np.uint64) * np.uint64(bits)
-    long_index = positions >> np.uint64(6)
-    bit_offset = positions & np.uint64(63)
-    lo = words[long_index] >> bit_offset
-    # bits taken from the next long; only straddling entries shift at all,
-    # and for them the shift is always in [1, 63]
-    spill = bit_offset.astype(np.int64) + bits - 64
-    crossing = spill > 0
-    hi = np.zeros(count, dtype=np.uint64)
-    if crossing.any():
-        idx = np.nonzero(crossing)[0]
-        hi[idx] = words[long_index[idx] + 1] << (np.uint64(64) - bit_offset[idx])
-    mask = (1 << bits) - 1
-    values = (lo | hi) & np.uint64(mask)
     dtype = np.uint16 if bits <= 16 else np.uint32
-    return values.astype(dtype).reshape(size.y, size.z, size.x).transpose(2, 0, 1)
+    out = np.empty(count, dtype=dtype)
+    mask = np.uint64((1 << bits) - 1)
+    chunk = 1 << 18
+    for start in range(0, count, chunk):
+        stop = min(start + chunk, count)
+        positions = np.arange(start, stop, dtype=np.uint64) * np.uint64(bits)
+        long_index = positions >> np.uint64(6)
+        bit_offset = positions & np.uint64(63)
+        values = words[long_index] >> bit_offset
+        spill = bit_offset.astype(np.int64) + bits - 64
+        crossing = np.nonzero(spill > 0)[0]
+        if crossing.size:
+            values[crossing] |= words[long_index[crossing] + 1] << (
+                np.uint64(64) - bit_offset[crossing]
+            )
+        values &= mask
+        out[start:stop] = values
+    return out.reshape(size.y, size.z, size.x).transpose(2, 0, 1)
 
 
 def _vec3(compound: Mapping, field: str, source: str) -> Vec3i:

@@ -43,3 +43,7 @@ def test_all_names_importable_and_documented():
     for name in litematic.__all__:
         obj = getattr(litematic, name)
         assert obj.__doc__, f"{name} is exported but has no docstring"
+
+
+def test_package_declares_thread_safety_stance():
+    assert "thread" in (litematic.__doc__ or "").lower()

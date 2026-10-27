@@ -1,4 +1,8 @@
-"""litematic - read-only parser for Minecraft Litematica .litematic schematics."""
+"""litematic - read-only parser for Minecraft Litematica .litematic schematics.
+
+Instances are not thread-safe: parse and query a Litematic from a single
+thread or asyncio task at a time.
+"""
 
 from litematic.errors import LitematicError, LitematicFormatError, NbtError
 from litematic.model import (

@@ -79,6 +79,7 @@ class Region:
     first access and caches the result until `release()`.
     `pending_states`/`pending_counts` are the file's pending-block fields,
     retained verbatim (semantics defined by the writing Litematica version).
+    Not thread-safe.
     """
 
     def __init__(

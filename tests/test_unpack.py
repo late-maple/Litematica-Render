@@ -1,5 +1,7 @@
 """Bit-unpacking contract: roundtrip, cross-long boundaries, bit width, YZX order."""
 
+import tracemalloc
+
 import numpy as np
 import pytest
 from helpers.litematica_packer import pack_indices
@@ -81,3 +83,27 @@ def test_wide_palette_uses_uint32():
     out = _unpack_indices(packed, bits=17, size=size)
     assert out.dtype == np.uint32
     assert int(out[0, 0, 0]) == 100000 - 1
+
+
+def test_unpack_peak_memory_bounded():
+    # 2M entries, palette 512 -> 9 bits; output is 4MB, so the transient
+    # peak must stay far below the ~130MB the unbounded version reached
+    size = Vec3i(500, 50, 80)
+    count = size.x * size.y * size.z
+    rng = np.random.default_rng(3)
+    vals = rng.integers(0, 512, size=count).astype(np.uint16)
+    packed = pack_indices(vals, 512)
+
+    tracemalloc.start()
+    out = _unpack_indices(packed, bits=9, size=size)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert peak < 100_000_000
+    # spot check: map flat YZX file index to (x, y, z)
+    for _ in range(1000):
+        i = int(rng.integers(count))
+        per_layer = size.z * size.x
+        y, rem = divmod(i, per_layer)
+        z, x = divmod(rem, size.x)
+        assert out[x, y, z] == vals[i]
