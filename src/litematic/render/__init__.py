@@ -6,7 +6,11 @@ import numpy as np
 
 from litematic.parse.model import Litematic
 from litematic.render.errors import RenderError
-from litematic.render.isometric import _AIR_NAMES, _compose
+from litematic.render.isometric import (
+    _AIR_NAMES,
+    _compose,
+    _state_is_magenta,
+)
 from litematic.render.pack import load_pack
 from litematic.render.painter import _choose_scale, _downsample, _paint
 from litematic.render.png import encode_png
@@ -93,15 +97,13 @@ def unresolved_colors(
 ) -> set[str]:
     """Return block names the pack cannot cover; these render magenta."""
     textures = load_pack(_require_pack(textures_path))
-    # Pack-level coverage only; compose-time fallbacks land with Task 6/8.
-    covered = {key.split("[", 1)[0] for key in textures.quads_map}
-    names = {
+    return {
         state.name
         for region in schem.regions.values()
         for state in region.palette
         if state.name not in _AIR_NAMES
+        and _state_is_magenta(state, textures)
     }
-    return names - covered
 
 
 def _background(

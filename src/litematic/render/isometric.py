@@ -258,6 +258,12 @@ def _state_quads(state, textures: Textures) -> np.ndarray:
     return unit_cube_quads(_MAGENTA_TEXKEY)
 
 
+def _state_is_magenta(state, textures: Textures) -> bool:
+    """True when compose resolves this state to the magenta fallback cube."""
+    quads = _state_quads(state, textures)
+    return bool(np.any(quads["texkey"] == _MAGENTA_TEXKEY))
+
+
 def _builtin_texkey(name: str) -> str:
     """Texture array key for a block's canonical block/<stem> texture."""
     ns, _, stem = name.partition(":")
