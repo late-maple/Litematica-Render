@@ -6,6 +6,7 @@ import pytest
 from litematic.parse.model import BlockState
 from litematic.render.templates import (
     SHAPE_CUBE,
+    SHAPE_FLAT,
     SHAPE_SLAB_BOTTOM,
     SHAPE_SLAB_TOP,
     _shape_of,
@@ -106,3 +107,35 @@ def test_slab_side_texels_cropped_not_squashed():
         top = tm[SHAPE_SLAB_TOP]
         top_y = np.concatenate([top.texel_east[:, 1], top.texel_south[:, 1]])
         assert top_y.max() < 8
+
+
+@pytest.mark.parametrize(
+    "state,expected",
+    [
+        (BlockState("minecraft:rail", {}), SHAPE_FLAT),
+        (BlockState("minecraft:powered_rail", {}), SHAPE_FLAT),
+        (BlockState("minecraft:oak_pressure_plate", {}), SHAPE_FLAT),
+        (BlockState("minecraft:white_carpet", {}), SHAPE_FLAT),
+        (BlockState("minecraft:moss_carpet", {}), SHAPE_FLAT),
+        (BlockState("minecraft:repeater", {}), SHAPE_FLAT),
+        (BlockState("minecraft:comparator", {}), SHAPE_FLAT),
+        (BlockState("minecraft:redstone_wire", {}), SHAPE_FLAT),
+        (BlockState("minecraft:snow", {}), SHAPE_FLAT),
+        (BlockState("minecraft:oak_trapdoor", {}), SHAPE_CUBE),
+        (BlockState("minecraft:oak_slab", {}), SHAPE_SLAB_BOTTOM),
+        (BlockState("minecraft:oak_stairs", {}), SHAPE_CUBE),
+    ],
+)
+def test_shape_of_flat_family(state, expected):
+    assert _shape_of(state) == expected
+
+
+@pytest.mark.parametrize("t", [1, 2, 4])
+def test_flat_template_is_top_face_only(t):
+    flat = _shape_templates(t)[SHAPE_FLAT]
+    cube = _shape_templates(t)[SHAPE_CUBE]
+    assert flat.east.shape == (0, 2)
+    assert flat.south.shape == (0, 2)
+    assert len(flat.top) == 4 * t * t
+    assert np.array_equal(flat.top, cube.top)
+    assert np.array_equal(flat.texel_top, cube.texel_top)

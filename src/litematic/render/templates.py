@@ -9,8 +9,22 @@ from litematic.parse.model import BlockState
 SHAPE_CUBE = 0
 SHAPE_SLAB_BOTTOM = 1
 SHAPE_SLAB_TOP = 2
+SHAPE_FLAT = 3
 
 _TEX_SIZE = 16
+
+_FLAT_NAMES = {
+    "rail",
+    "repeater",
+    "comparator",
+    "redstone_wire",
+    "snow",
+    "string",
+    "tripwire",
+    "tripwire_hook",
+    "frogspawn",
+}
+_FLAT_SUFFIXES = ("_rail", "_pressure_plate", "_carpet")
 
 
 class _Template(NamedTuple):
@@ -25,16 +39,18 @@ class _Template(NamedTuple):
 
 
 def _shape_of(state: BlockState) -> int:
-    """Map a block state to cube / bottom slab / top slab (double slab is a cube)."""
+    """Map a block state to cube / slab / flat ground shapes."""
     path = state.name.split(":", 1)[-1]
-    if not path.endswith("_slab"):
-        return SHAPE_CUBE
-    slab_type = state.properties.get("type", "bottom")
-    if slab_type == "top":
-        return SHAPE_SLAB_TOP
-    if slab_type == "double":
-        return SHAPE_CUBE
-    return SHAPE_SLAB_BOTTOM
+    if path.endswith("_slab"):
+        slab_type = state.properties.get("type", "bottom")
+        if slab_type == "top":
+            return SHAPE_SLAB_TOP
+        if slab_type == "double":
+            return SHAPE_CUBE
+        return SHAPE_SLAB_BOTTOM
+    if path in _FLAT_NAMES or path.endswith(_FLAT_SUFFIXES):
+        return SHAPE_FLAT
+    return SHAPE_CUBE
 
 
 def _shape_templates(t: int) -> dict[int, _Template]:
@@ -48,10 +64,21 @@ def _shape_templates(t: int) -> dict[int, _Template]:
     slab_top = _template(
         t, top_v=t, east_top=3 * t, south_top=t, side_h=t, side_v=(0, 8)
     )
+    empty = np.zeros((0, 2), np.int16)
+    empty_texel = np.zeros((0, 2), np.uint8)
+    flat = _Template(
+        top=cube.top,
+        east=empty,
+        south=empty,
+        texel_top=cube.texel_top,
+        texel_east=empty_texel,
+        texel_south=empty_texel,
+    )
     return {
         SHAPE_CUBE: cube,
         SHAPE_SLAB_BOTTOM: slab_bottom,
         SHAPE_SLAB_TOP: slab_top,
+        SHAPE_FLAT: flat,
     }
 
 

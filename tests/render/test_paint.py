@@ -227,3 +227,11 @@ def test_paint_is_deterministic():
     first = _paint(scene, 2, _BG)
     second = _paint(scene, 2, _BG)
     assert np.array_equal(first, second)
+
+
+def test_flat_block_paints_top_rhombus_only():
+    scene = _scene([("minecraft:rail", {}, 0, 0, 0)])
+    img = _paint(scene, 2, _BG)
+    opaque = np.nonzero(img[..., 3] > 0)
+    assert len(opaque[0]) == 4 * 2 * 2
+    assert opaque[0].max() < 2 * 2
