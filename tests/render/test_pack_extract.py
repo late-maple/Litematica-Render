@@ -9,7 +9,22 @@ import pytest
 from PIL import Image
 
 from litematic.render.errors import RenderError
-from litematic.render.extract import ExtractSummary, _extract_pack
+from litematic.render.extract import (
+    _FACE_GEOM,
+    ExtractSummary,
+    _compile_elements,
+    _extract_pack,
+    _resolve_ref,
+)
+from litematic.render.quads import (
+    QUAD_DTYPE,
+    TIER_DOWN,
+    TIER_EAST,
+    TIER_NORTH,
+    TIER_SOUTH,
+    TIER_WEST,
+    unit_cube_quads,
+)
 
 
 def _solid_png(color, size=(16, 16)):
@@ -586,3 +601,193 @@ def test_builtin_parent_stays_unresolved(tmp_path):
     data = _load_npz(dest)
     assert summary.skipped == 1
     assert not [k for k in data.files if k.startswith("map/minecraft:chest[")]
+
+
+# Elements-to-quads compiler (plan Task 2).
+
+_FACES = ("down", "up", "north", "south", "west", "east")
+
+
+def _texkey_stub(files):
+    """Build a texkey_for stub resolving face texture refs via a mapping."""
+
+    def resolve(face, textures, ns):
+        ref = _resolve_ref(face.get("texture"), textures)
+        if ref is None:
+            return None
+        return files.get(ref)
+
+    return resolve
+
+
+def _box_element(faces, frm=(0, 0, 0), to=(16, 16, 16)):
+    """Build one box element dict with the given per-face dicts."""
+    return {"from": list(frm), "to": list(to), "faces": faces}
+
+
+def test_unit_box_compiles_six_quads():
+    faces = {name: {"texture": "#all"} for name in _FACES}
+    quads = _compile_elements(
+        [_box_element(faces)],
+        {"all": "block/stone"},
+        "minecraft",
+        0,
+        0,
+        _texkey_stub({"block/stone": "block/stone"}),
+    )
+    assert quads is not None
+    assert quads.dtype == QUAD_DTYPE
+    assert len(quads) == 6
+    assert sorted(int(t) for t in quads["shade"]) == [0, 1, 2, 3, 4, 5]
+    assert not quads["dbl"].any()
+    full_uv = [(0, 0), (16, 0), (16, 16), (0, 16)]
+    for quad in quads:
+        assert quad["texkey"] == "block/stone"
+        assert np.allclose(quad["uv"], full_uv)
+        assert np.allclose(quad["vtx"], _FACE_GEOM[int(quad["shade"])])
+
+
+def test_half_box_auto_uv_crops():
+    faces = {name: {"texture": "#all"} for name in _FACES}
+    quads = _compile_elements(
+        [_box_element(faces, to=(16, 8, 16))],
+        {"all": "block/stone"},
+        "minecraft",
+        0,
+        0,
+        _texkey_stub({"block/stone": "block/stone"}),
+    )
+    assert quads is not None
+    by_tier = {int(q["shade"]): q for q in quads}
+    side_uv = [(0, 8), (16, 8), (16, 16), (0, 16)]
+    for tier in (TIER_NORTH, TIER_SOUTH, TIER_WEST, TIER_EAST):
+        assert np.allclose(by_tier[tier]["uv"], side_uv)
+    assert np.allclose(
+        by_tier[TIER_SOUTH]["vtx"],
+        [(0, 8, 16), (16, 8, 16), (16, 0, 16), (0, 0, 16)],
+    )
+
+
+def test_y_rot_remaps_east_to_south():
+    faces = {name: {"texture": f"block/{name}"} for name in _FACES}
+    files = {f"block/{name}": f"block/{name}" for name in _FACES}
+    quads = _compile_elements(
+        [_box_element(faces)], {}, "minecraft", 0, 90, _texkey_stub(files)
+    )
+    assert quads is not None
+    east = next(q for q in quads if q["texkey"] == "block/east")
+    assert int(east["shade"]) == TIER_SOUTH
+    assert np.allclose(
+        east["vtx"], [(16, 16, 16), (0, 16, 16), (0, 0, 16), (16, 0, 16)]
+    )
+    assert np.allclose(east["uv"], [(0, 0), (16, 0), (16, 16), (0, 16)])
+
+
+def test_furnace_front_upright_on_south():
+    faces = {name: {"texture": "#side"} for name in _FACES}
+    faces["north"] = {"texture": "#front"}
+    textures = {"front": "block/furnace_front", "side": "block/furnace_side"}
+    files = {
+        "block/furnace_front": "front_key",
+        "block/furnace_side": "side_key",
+    }
+    quads = _compile_elements(
+        [_box_element(faces)], textures, "minecraft", 0, 180, _texkey_stub(files)
+    )
+    assert quads is not None
+    front = [q for q in quads if q["texkey"] == "front_key"]
+    assert len(front) == 1
+    assert int(front[0]["shade"]) == TIER_SOUTH
+    assert np.allclose(
+        front[0]["vtx"], [(0, 16, 16), (16, 16, 16), (16, 0, 16), (0, 0, 16)]
+    )
+    assert np.allclose(front[0]["uv"], [(0, 0), (16, 0), (16, 16), (0, 16)])
+    # Unrotated layout with the front directly on the model south face
+    # exercises the pinned south auto-UV axis table (u=x, v=16-y).
+    faces["north"] = {"texture": "#side"}
+    faces["south"] = {"texture": "#front"}
+    static = _compile_elements(
+        [_box_element(faces)], textures, "minecraft", 0, 0, _texkey_stub(files)
+    )
+    assert static is not None
+    front = [q for q in static if q["texkey"] == "front_key"]
+    assert len(front) == 1
+    assert int(front[0]["shade"]) == TIER_SOUTH
+    assert np.allclose(
+        front[0]["vtx"], [(0, 16, 16), (16, 16, 16), (16, 0, 16), (0, 0, 16)]
+    )
+    assert np.allclose(front[0]["uv"], [(0, 0), (16, 0), (16, 16), (0, 16)])
+
+
+def test_non_parallelogram_face_skipped():
+    faces = {name: {"texture": "#all"} for name in _FACES}
+    bad = _box_element(faces, frm=(float("nan"), 0, 0))
+    quads = _compile_elements(
+        [bad, _box_element(faces)],
+        {"all": "block/stone"},
+        "minecraft",
+        0,
+        0,
+        _texkey_stub({"block/stone": "block/stone"}),
+    )
+    assert quads is not None
+    assert len(quads) == 6
+    assert np.isfinite(quads["vtx"]).all()
+
+
+def test_explicit_uv_used_and_invalid_faces_skipped():
+    faces = {
+        "south": {"texture": "block/a", "uv": [4, 8, 12, 16]},
+        "north": {"texture": "block/a", "uv": [0, 0, 16, 20]},
+        "up": {"texture": "#missing"},
+    }
+    quads = _compile_elements(
+        [_box_element(faces)],
+        {},
+        "minecraft",
+        0,
+        0,
+        _texkey_stub({"block/a": "key_a"}),
+    )
+    assert quads is not None
+    assert len(quads) == 1
+    assert int(quads[0]["shade"]) == TIER_SOUTH
+    assert np.allclose(quads[0]["uv"], [(4, 8), (12, 8), (12, 16), (4, 16)])
+
+
+def test_huge_int_element_skipped():
+    faces = {name: {"texture": "#all"} for name in _FACES}
+    huge = 10**400
+    quads = _compile_elements(
+        [
+            _box_element(faces, frm=(huge, 0, 0)),
+            _box_element({"south": {"texture": "#all", "uv": [0, 0, 16, huge]}}),
+            _box_element(faces),
+        ],
+        {"all": "block/stone"},
+        "minecraft",
+        0,
+        0,
+        _texkey_stub({"block/stone": "block/stone"}),
+    )
+    assert quads is not None
+    assert len(quads) == 6
+    assert np.isfinite(quads["vtx"]).all()
+
+
+def test_x_rot_remaps_north_to_down():
+    faces = {name: {"texture": f"block/{name}"} for name in _FACES}
+    files = {f"block/{name}": f"block/{name}" for name in _FACES}
+    quads = _compile_elements(
+        [_box_element(faces)], {}, "minecraft", 90, 0, _texkey_stub(files)
+    )
+    assert quads is not None
+    north = next(q for q in quads if q["texkey"] == "block/north")
+    assert int(north["shade"]) == TIER_DOWN
+    assert np.allclose(north["vtx"], [(16, 0, 0), (0, 0, 0), (0, 0, 16), (16, 0, 16)])
+    assert np.allclose(north["uv"], [(0, 0), (16, 0), (16, 16), (0, 16)])
+
+
+def test_face_geom_matches_unit_cube_quads():
+    table = np.stack([_FACE_GEOM[tier] for tier in range(6)])
+    assert np.array_equal(table, unit_cube_quads("k")["vtx"])

@@ -2,13 +2,24 @@
 
 import io
 import json
+import math
 import zipfile
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Callable, NamedTuple, cast
 
 import numpy as np
 
 from litematic.render.errors import RenderError
+from litematic.render.quads import (
+    QUAD_DTYPE,
+    TIER_DOWN,
+    TIER_EAST,
+    TIER_NORTH,
+    TIER_SOUTH,
+    TIER_UP,
+    TIER_WEST,
+    is_parallelogram,
+)
 
 __all__ = ["ExtractSummary"]
 
@@ -32,6 +43,25 @@ _VEC = {
 _NAME = {v: k for k, v in _VEC.items()}
 _WORLD_FACES = ("up", "east", "south")
 _ALL_FACES = tuple(_VEC)
+_FACE_TIER = {
+    "down": TIER_DOWN,
+    "up": TIER_UP,
+    "north": TIER_NORTH,
+    "south": TIER_SOUTH,
+    "west": TIER_WEST,
+    "east": TIER_EAST,
+}
+# Pinned auto-UV axes (v runs down the texture): down u=x v=16-z | up u=x
+# v=z | north u=16-x v=16-y | south u=x v=16-y | west u=16-z v=16-y |
+# east u=z v=16-y. Corner order is always (u1,v1),(u2,v1),(u2,v2),(u1,v2).
+_FACE_GEOM: dict[int, tuple[tuple[int, int, int], ...]] = {
+    TIER_DOWN: ((0, 0, 16), (16, 0, 16), (16, 0, 0), (0, 0, 0)),
+    TIER_UP: ((0, 16, 0), (16, 16, 0), (16, 16, 16), (0, 16, 16)),
+    TIER_NORTH: ((16, 16, 0), (0, 16, 0), (0, 0, 0), (16, 0, 0)),
+    TIER_SOUTH: ((0, 16, 16), (16, 16, 16), (16, 0, 16), (0, 0, 16)),
+    TIER_WEST: ((0, 16, 16), (0, 16, 0), (0, 0, 0), (0, 0, 16)),
+    TIER_EAST: ((16, 16, 0), (16, 16, 16), (16, 0, 16), (16, 0, 0)),
+}
 
 
 class ExtractSummary(NamedTuple):
@@ -207,6 +237,135 @@ def _face_array_key(
     return array_key
 
 
+def _compile_elements(
+    elements: list[dict[str, Any]],
+    textures: dict[str, str],
+    ns: str,
+    x_rot: int,
+    y_rot: int,
+    texkey_for: Callable[[dict[str, Any], dict[str, str], str], str | None],
+) -> np.ndarray | None:
+    """Compile box elements into world-space quads for one variant."""
+    rows: list[tuple[Any, Any, str, int]] = []
+    kx = (int(x_rot) // 90) % 4
+    ky = (int(y_rot) // 90) % 4
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
+        bounds = _element_bounds(element)
+        faces = element.get("faces")
+        if bounds is None or not isinstance(faces, dict):
+            continue
+        for face_name, tier in _FACE_TIER.items():
+            face = faces.get(face_name)
+            if not isinstance(face, dict):
+                continue
+            texkey = texkey_for(face, textures, ns)
+            if texkey is None:
+                continue
+            corners = _box_corners(bounds, tier)
+            uvs = _face_uvs(face, tier, corners)
+            if uvs is None:
+                continue
+            world_tier = _FACE_TIER[_rotate(face_name, x_rot, y_rot)]
+            rows.append((_rotate_corners(corners, kx, ky), uvs, texkey, world_tier))
+    if not rows:
+        return None
+    quads = np.empty(len(rows), dtype=QUAD_DTYPE)
+    for index, (corners, uvs, texkey, shade) in enumerate(rows):
+        quads[index] = (corners, uvs, texkey, shade, False)
+    keep = is_parallelogram(quads)
+    if not keep.any():
+        return None
+    return quads[keep]
+
+
+def _element_bounds(
+    element: dict[str, Any],
+) -> tuple[float, float, float, float, float, float] | None:
+    """Parse from/to into six finite floats, or None when malformed."""
+    frm = element.get("from")
+    to = element.get("to")
+    if not isinstance(frm, (list, tuple)) or not isinstance(to, (list, tuple)):
+        return None
+    if len(frm) != 3 or len(to) != 3:
+        return None
+    try:
+        values = tuple(float(value) for value in (*frm, *to))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not all(math.isfinite(value) for value in values):
+        return None
+    return cast("tuple[float, float, float, float, float, float]", values)
+
+
+def _box_corners(
+    bounds: tuple[float, float, float, float, float, float], tier: int
+) -> list[tuple[float, float, float]]:
+    """Scale the pinned unit-cube corners of one tier onto an element box."""
+    x0, y0, z0, x1, y1, z1 = bounds
+    axis = ((x0, x1), (y0, y1), (z0, z1))
+    return [
+        (axis[0][corner[0] // 16], axis[1][corner[1] // 16], axis[2][corner[2] // 16])
+        for corner in _FACE_GEOM[tier]
+    ]
+
+
+def _face_uvs(
+    face: dict[str, Any], tier: int, corners: list[tuple[float, float, float]]
+) -> list[tuple[float, float]] | None:
+    """Resolve per-corner texel coords: explicit uv first, else auto-UV."""
+    rect = face.get("uv")
+    if rect is None:
+        return [_auto_uv(tier, x, y, z) for (x, y, z) in corners]
+    if not isinstance(rect, (list, tuple)) or len(rect) != 4:
+        return None
+    try:
+        u1, v1, u2, v2 = (float(value) for value in rect)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if min(u1, v1, u2, v2) < 0.0 or max(u1, v1, u2, v2) > 16.0:
+        return None
+    return [(u1, v1), (u2, v1), (u2, v2), (u1, v2)]
+
+
+def _auto_uv(tier: int, x: float, y: float, z: float) -> tuple[float, float]:
+    """Map one face corner to texel coords per the pinned auto-UV axis table."""
+    if tier == TIER_DOWN:
+        return (x, 16.0 - z)
+    if tier == TIER_UP:
+        return (x, z)
+    if tier == TIER_NORTH:
+        return (16.0 - x, 16.0 - y)
+    if tier == TIER_SOUTH:
+        return (x, 16.0 - y)
+    if tier == TIER_WEST:
+        return (16.0 - z, 16.0 - y)
+    return (z, 16.0 - y)
+
+
+def _rot_x_point(point: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Rotate one block-space point 90 degrees around the x axis."""
+    return (point[0], point[2], 16.0 - point[1])
+
+
+def _rot_y_point(point: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Rotate one block-space point 90 degrees around the y axis."""
+    return (16.0 - point[2], point[1], point[0])
+
+
+def _rotate_corners(
+    corners: list[tuple[float, float, float]], kx: int, ky: int
+) -> list[tuple[float, float, float]]:
+    """Apply x then y blockstate rotation steps to all four corners."""
+    out = corners
+    for _ in range(kx):
+        out = [_rot_x_point(point) for point in out]
+    for _ in range(ky):
+        out = [_rot_y_point(point) for point in out]
+    return out
+
+
 def _all_variants(state: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     out: list[tuple[str, dict[str, Any]]] = []
     variants = state.get("variants")
@@ -349,8 +508,8 @@ def _resolve_ref(ref: Any, textures: dict[str, str]) -> str | None:
 
 def _rotate(face: str, x: int, y: int) -> str:
     vec = _VEC[face]
-    for _ in range((x // 90) % 4):  # y' = -z, z' = y
-        vec = (vec[0], -vec[2], vec[1])
+    for _ in range((x // 90) % 4):  # y' = z, z' = -y
+        vec = (vec[0], vec[2], -vec[1])
     for _ in range((y // 90) % 4):  # x' = -z, z' = x
         vec = (-vec[2], vec[1], vec[0])
     return _NAME[vec]
