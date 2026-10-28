@@ -987,3 +987,446 @@ def test_quad_fuse_boundary_256_kept(tmp_path):
     assert summary.skipped == 0
     data = _load_npz(dest)
     assert len(data["quads/minecraft:edge[]"]) == 256
+
+
+# Non-box elements: rotation, planes, dbl, shade (spec 5.1 / 3 / 11).
+
+
+def _element(frm, to, faces, rotation=None, shade=None):
+    """Build one element dict with optional rotation and shade overrides."""
+    element = {"from": list(frm), "to": list(to), "faces": faces}
+    if rotation is not None:
+        element["rotation"] = rotation
+    if shade is not None:
+        element["shade"] = shade
+    return element
+
+
+def _cross_rotation(angle, rescale=True, origin=(8, 8, 8), axis="y"):
+    """Vanilla-style cross element rotation: 45 degrees, optional rescale."""
+    return {
+        "origin": list(origin),
+        "axis": axis,
+        "angle": angle,
+        "rescale": rescale,
+    }
+
+
+def _cross_faces():
+    return {"north": {"texture": "#cross"}, "south": {"texture": "#cross"}}
+
+
+def _compile_one(element, texkey="block/grass"):
+    return _compile_elements(
+        [element],
+        {"cross": texkey},
+        "minecraft",
+        0,
+        0,
+        _texkey_stub({texkey: texkey}),
+    )
+
+
+def _corner_set(quads):
+    """Sorted rounded unique vertex tuples across all quads."""
+    return sorted(
+        {
+            tuple(round(float(v), 4) for v in point)
+            for quad in quads
+            for point in quad["vtx"]
+        }
+    )
+
+
+def test_cross_element_compiles_rotated_double_sided():
+    quads = _compile_one(
+        _element(
+            (0.8, 0, 8), (15.2, 16, 8), _cross_faces(),
+            rotation=_cross_rotation(45),
+        )
+    )
+    assert quads is not None
+    assert len(quads) == 2
+    assert quads["dbl"].all()
+    assert (quads["shade"] == TIER_UP).all()
+    assert _corner_set(quads) == sorted(
+        [
+            (0.8, 0.0, 15.2),
+            (15.2, 0.0, 0.8),
+            (15.2, 16.0, 0.8),
+            (0.8, 16.0, 15.2),
+        ]
+    )
+
+
+def test_cross_element_negative_angle_other_diagonal():
+    quads = _compile_one(
+        _element(
+            (0.8, 0, 8), (15.2, 16, 8), _cross_faces(),
+            rotation=_cross_rotation(-45),
+        )
+    )
+    assert quads is not None
+    assert _corner_set(quads) == sorted(
+        [
+            (0.8, 0.0, 0.8),
+            (15.2, 0.0, 15.2),
+            (15.2, 16.0, 15.2),
+            (0.8, 16.0, 0.8),
+        ]
+    )
+
+
+def test_flat_element_marks_dbl_up_tier():
+    quads = _compile_one(
+        _element((0, 0, 8), (16, 16, 8), _cross_faces())
+    )
+    assert quads is not None
+    assert len(quads) == 2
+    assert quads["dbl"].all()
+    assert (quads["shade"] == TIER_UP).all()
+    assert (quads["vtx"][..., 2] == 8.0).all()
+    assert np.allclose(quads["uv"], [[(0, 0), (16, 0), (16, 16), (0, 16)]] * 2)
+
+
+def test_flat_element_skips_degenerate_faces():
+    faces = {**_cross_faces(), "up": {"texture": "#cross"}}
+    quads = _compile_one(_element((0, 0, 8), (16, 16, 8), faces))
+    assert quads is not None
+    assert len(quads) == 2
+
+
+def test_box_shade_false_renders_constant():
+    faces = {name: {"texture": "#cross"} for name in _FACES}
+    quads = _compile_one(_element((0, 0, 0), (16, 16, 16), faces, shade=False))
+    assert quads is not None
+    assert len(quads) == 6
+    assert not quads["dbl"].any()
+    assert (quads["shade"] == TIER_UP).all()
+
+
+def test_rescale_false_shrinks_rotated_plane():
+    quads = _compile_one(
+        _element(
+            (0.8, 0, 8), (15.2, 16, 8), _cross_faces(),
+            rotation=_cross_rotation(45, rescale=False),
+        )
+    )
+    assert quads is not None
+    half = 7.2 * 2 ** -0.5
+    assert _corner_set(quads) == sorted(
+        [
+            (round(8 - half, 4), 0.0, round(8 + half, 4)),
+            (round(8 + half, 4), 0.0, round(8 - half, 4)),
+            (round(8 + half, 4), 16.0, round(8 - half, 4)),
+            (round(8 - half, 4), 16.0, round(8 + half, 4)),
+        ]
+    )
+
+
+def test_rotated_box_element_is_double_sided():
+    faces = {name: {"texture": "#cross"} for name in _FACES}
+    quads = _compile_one(
+        _element(
+            (0, 0, 0), (16, 16, 16), faces,
+            rotation=_cross_rotation(45, rescale=False),
+        )
+    )
+    assert quads is not None
+    assert len(quads) == 6
+    assert quads["dbl"].all()
+    assert (quads["shade"] == TIER_UP).all()
+    diag = 8.0 * 2 ** 0.5
+    hull = sorted(
+        {
+            (round(8 + x, 4), y, round(8 + z, 4))
+            for x, z in ((diag, 0.0), (0.0, -diag), (0.0, diag), (-diag, 0.0))
+            for y in (0.0, 16.0)
+        }
+    )
+    assert _corner_set(quads) == hull
+
+
+def test_malformed_element_rotation_skips_element():
+    for rotation in ({"angle": 30}, {"axis": "q", "angle": 45}, "nope", 5):
+        element = _element(
+            (0.8, 0, 8), (15.2, 16, 8), _cross_faces(), rotation=rotation
+        )
+        assert _compile_one(element) is None, rotation
+
+
+def test_line_element_skipped():
+    quads = _compile_one(
+        _element((8, 0, 8), (8, 16, 8), _cross_faces())
+    )
+    assert quads is None
+
+
+def test_element_rotation_origin_matters():
+    quads = _compile_one(
+        _element(
+            (0.8, 0, 8), (15.2, 16, 8), _cross_faces(),
+            rotation=_cross_rotation(45, origin=(0, 0, 0)),
+        )
+    )
+    assert quads is not None
+    assert _corner_set(quads) == sorted(
+        [
+            (8.8, 0.0, 7.2),
+            (23.2, 0.0, -7.2),
+            (23.2, 16.0, -7.2),
+            (8.8, 16.0, 7.2),
+        ]
+    )
+
+
+# Texture-direct fallback absorbed by the builtin shape table (plan Task 6
+# adjudication: builtin geometry wins, the bare cube only covers unknown
+# families).
+
+
+def test_texture_fallback_uses_builtin_cross_geometry(tmp_path):
+    # Cross plants are a builtin family: no extraction quads (compose's
+    # state-aware builtin renders them), texture registered for backfill.
+    entries = {
+        "assets/minecraft/textures/block/short_grass.png": _solid_png(
+            (90, 160, 70, 255)
+        )
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    assert not [k for k in data.files if k.startswith("quads/minecraft:short_grass[")]
+    tinted = _tex(data, "block/short_grass@145,189,89")
+    factor = np.array([145, 189, 89, 255], np.uint16)
+    want = (np.array([(90, 160, 70, 255)], np.uint16) * factor // 255).astype(
+        np.uint8
+    )
+    assert (tinted == want[0]).all()
+
+
+def test_texture_fallback_builtin_slab_keeps_shape_not_occl(tmp_path):
+    entries = {
+        "assets/minecraft/textures/block/oak_slab.png": _solid_png(
+            (110, 84, 52, 255)
+        )
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    assert not [k for k in data.files if k.startswith("quads/minecraft:oak_slab[")]
+    assert (_tex(data, "block/oak_slab") == (110, 84, 52, 255)).all()
+
+
+def test_texture_fallback_unknown_family_stays_cube(tmp_path):
+    entries = {
+        "assets/minecraft/textures/block/mud_like.png": _solid_png(
+            (120, 85, 60, 255)
+        )
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    quads = data["quads/minecraft:mud_like[]"]
+    assert len(quads) == 6
+    assert not quads["dbl"].any()
+    assert int(data["occl/minecraft:mud_like[]"].item()) == 1
+
+
+# Multipart blockstates (spec gap: only all-unconditional multiparts carry
+# pack geometry; conditional ones defer to builtin shapes / magenta).
+
+
+def _face_model(stem, texture):
+    return json.dumps(
+        {
+            "elements": [
+                {
+                    "from": [0, 0, 0],
+                    "to": [16, 16, 16],
+                    "faces": {"south": {"texture": texture}},
+                }
+            ]
+        }
+    )
+
+
+def _multipart_entries(multipart):
+    return {
+        "assets/minecraft/blockstates/gate.json": json.dumps(
+            {"multipart": multipart}
+        ),
+        "assets/minecraft/models/block/post.json": _face_model(
+            "post", "block/post"
+        ),
+        "assets/minecraft/models/block/arm.json": _face_model(
+            "arm", "block/arm"
+        ),
+        "assets/minecraft/textures/block/post.png": _solid_png(
+            (1, 2, 3, 255)
+        ),
+        "assets/minecraft/textures/block/arm.png": _solid_png((4, 5, 6, 255)),
+    }
+
+
+def test_multipart_conditional_parts_defer_to_builtin(tmp_path):
+    # Escalation ruling: conditional multiparts emit no quads at all (not
+    # even the unconditional part) so builtin connection geometry shows
+    # through; the state counts as skipped.
+    entries = _multipart_entries(
+        [
+            {"apply": {"model": "block/post"}},
+            {"when": {"north": "true"}, "apply": {"model": "block/arm"}},
+        ]
+    )
+    dest = tmp_path / "out.npz"
+    summary = _extract_pack(
+        _make_pack(tmp_path / "pack.zip", entries), dest
+    )
+    assert summary.skipped == 1
+    data = _load_npz(dest)
+    assert not [k for k in data.files if k.startswith("quads/minecraft:gate[")]
+    assert not [k for k in data.files if k.startswith("occl/minecraft:gate[")]
+
+
+def test_multipart_first_part_conditional_no_pack_quads(tmp_path):
+    entries = _multipart_entries(
+        [{"when": {"north": "true"}, "apply": {"model": "block/arm"}}]
+    )
+    data = _load_npz(_extract(tmp_path, entries))
+    assert not [k for k in data.files if k.startswith("quads/minecraft:gate[")]
+
+
+def test_multipart_unconditional_parts_union(tmp_path):
+    entries = _multipart_entries(
+        [{"apply": {"model": "block/post"}}, {"apply": {"model": "block/arm"}}]
+    )
+    data = _load_npz(_extract(tmp_path, entries))
+    quads = data["quads/minecraft:gate[]"]
+    assert sorted(str(k) for k in quads["texkey"]) == [
+        "block/arm",
+        "block/post",
+    ]
+
+
+def test_multipart_unconditional_apply_list_union(tmp_path):
+    entries = _multipart_entries(
+        [
+            {
+                "apply": [
+                    {"model": "block/post"},
+                    {"model": "block/arm", "x": 90},
+                ]
+            }
+        ]
+    )
+    data = _load_npz(_extract(tmp_path, entries))
+    quads = data["quads/minecraft:gate[]"]
+    assert sorted(str(k) for k in quads["texkey"]) == [
+        "block/arm",
+        "block/post",
+    ]
+
+
+def test_multipart_single_unconditional_part(tmp_path):
+    entries = _multipart_entries([{"apply": {"model": "block/post"}}])
+    data = _load_npz(_extract(tmp_path, entries))
+    quads = data["quads/minecraft:gate[]"]
+    assert set(str(k) for k in quads["texkey"]) == {"block/post"}
+
+
+# Round-2 layering: blocks the builtin table knows must never get
+# extraction-side geometry (it would shadow compose's state-aware builtin),
+# and their texture resolves through the spec 5.3 chain: the block's own
+# model textures first, then textures/block/<stem>.png.
+
+
+def _fence_pack_entries(**extra):
+    model = json.dumps(
+        {
+            "textures": {"planks": "block/oak_planks"},
+            "elements": [
+                {
+                    "from": [0, 0, 0],
+                    "to": [16, 16, 16],
+                    "faces": {"south": {"texture": "#planks"}},
+                }
+            ],
+        }
+    )
+    entries = {
+        "assets/minecraft/blockstates/oak_fence.json": json.dumps(
+            {
+                "multipart": [
+                    {"apply": {"model": "block/fence_post"}},
+                    {"when": {"north": "true"}, "apply": {"model": "block/fence_side"}},
+                ]
+            }
+        ),
+        "assets/minecraft/models/block/fence_post.json": model,
+        "assets/minecraft/models/block/fence_side.json": model,
+        "assets/minecraft/textures/block/oak_planks.png": _solid_png(
+            (168, 90, 50, 255)
+        ),
+    }
+    entries.update(extra)
+    return entries
+
+
+def test_vanilla_fence_defers_geometry_and_rekeys_model_texture(tmp_path):
+    entries = _fence_pack_entries(
+        **{
+            "assets/minecraft/textures/block/oak_fence.png": _solid_png(
+                (9, 9, 9, 255)
+            )
+        }
+    )
+    dest = tmp_path / "out.npz"
+    summary = _extract_pack(_make_pack(tmp_path / "pack.zip", entries), dest)
+    data = _load_npz(dest)
+    assert summary.skipped == 1
+    assert not [k for k in data.files if k.startswith("quads/minecraft:oak_fence[")]
+    # Spec 5.3 level 1: the model's own planks texture wins over the
+    # same-name file and is registered under the canonical block key.
+    assert (_tex(data, "block/oak_fence") == (168, 90, 50, 255)).all()
+
+
+def test_vanilla_fence_without_same_name_texture_still_resolves(tmp_path):
+    entries = _fence_pack_entries()
+    data = _load_npz(_extract(tmp_path, entries))
+    assert not [k for k in data.files if k.startswith("quads/minecraft:oak_fence[")]
+    assert (_tex(data, "block/oak_fence") == (168, 90, 50, 255)).all()
+
+
+def test_broken_model_family_keeps_same_name_texture(tmp_path):
+    entries = {
+        "assets/minecraft/blockstates/oak_stairs.json": _blockstates(
+            "block/missing_model"
+        ),
+        "assets/minecraft/textures/block/oak_stairs.png": _solid_png(
+            (110, 84, 52, 255)
+        ),
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    assert not [k for k in data.files if k.startswith("quads/minecraft:oak_stairs[")]
+    assert (_tex(data, "block/oak_stairs") == (110, 84, 52, 255)).all()
+
+
+def test_builtin_entity_parent_registers_model_texture(tmp_path):
+    entries = {
+        "assets/minecraft/blockstates/chest.json": _blockstates("block/chest"),
+        "assets/minecraft/models/block/chest.json": json.dumps(
+            {"parent": "builtin/entity", "textures": {"particle": "block/planks"}}
+        ),
+        "assets/minecraft/textures/block/planks.png": _solid_png((1, 2, 3, 255)),
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    assert not [k for k in data.files if k.startswith("quads/minecraft:chest[")]
+    assert (_tex(data, "block/chest") == (1, 2, 3, 255)).all()
+
+
+def test_texture_fallback_family_registers_texture_without_quads(tmp_path):
+    entries = {
+        "assets/minecraft/textures/block/short_grass.png": _solid_png(
+            (98, 158, 68, 255)
+        )
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    assert not [k for k in data.files if k.startswith("quads/minecraft:short_grass[")]
+    # v1 dedup: tinted blocks register only the @tint array key.
+    tinted = _tex(data, "block/short_grass@145,189,89")
+    assert (tinted == (55, 117, 23, 255)).all()

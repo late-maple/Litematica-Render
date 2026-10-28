@@ -30,12 +30,13 @@ class Textures(NamedTuple):
     quads_map: dict[str, np.ndarray]
     occl_map: dict[str, bool]
     pack_mtime: float
+    states: dict[str, dict[str, dict[str, str]]] | None = None
 
     def quads(
         self, name: str, properties: Mapping[str, str]
     ) -> np.ndarray | None:
         """Return the state's QUAD_DTYPE quads, [] key as fallback."""
-        for state_key in (_state_key_of(properties), ""):
+        for state_key in self._matching_states(name, properties):
             entry = self.quads_map.get(f"{name}[{state_key}]")
             if entry is not None:
                 return entry
@@ -43,16 +44,60 @@ class Textures(NamedTuple):
 
     def occludes(self, name: str, properties: Mapping[str, str]) -> bool:
         """Return the state's opaque-cube flag; missing entries are False."""
-        for state_key in (_state_key_of(properties), ""):
+        for state_key in self._matching_states(name, properties):
             flag = self.occl_map.get(f"{name}[{state_key}]")
             if flag is not None:
                 return flag
         return False
 
+    def _matching_states(
+        self, name: str, properties: Mapping[str, str]
+    ) -> list[str]:
+        """State keys satisfied by the properties, most specific first.
+
+        npz keys are the pack's own variant keys, whose property pairs act
+        as requirements (vanilla partial-key semantics): a key matches when
+        every one of its pairs equals the state's property value, so extra
+        schematic properties such as waterlogged=false never break a match.
+        """
+        if self.states is None:
+            return [_state_key_of(properties), ""]
+        found = [
+            (-len(pairs), key)
+            for key, pairs in self.states.get(name, {}).items()
+            if all(
+                properties.get(prop) == value for prop, value in pairs.items()
+            )
+        ]
+        return [key for _, key in sorted(found)]
+
 
 def _state_key_of(properties: Mapping[str, str]) -> str:
     joined = ",".join(f"{key}={value}" for key, value in properties.items())
     return _normalize_state_key(joined)
+
+
+def _state_index(
+    quads_map: dict[str, np.ndarray], occl_map: dict[str, bool]
+) -> dict[str, dict[str, dict[str, str]]]:
+    """Map block name to {state key: required property pairs}."""
+    index: dict[str, dict[str, dict[str, str]]] = {}
+    for full_key in (*quads_map, *occl_map):
+        block, _, state = str(full_key).partition("[")
+        if not state.endswith("]"):
+            continue
+        index.setdefault(block, {})[state[:-1]] = _state_pairs(state[:-1])
+    return index
+
+
+def _state_pairs(state_key: str) -> dict[str, str]:
+    """Parse a state key into its property pairs; the empty key is {}."""
+    pairs: dict[str, str] = {}
+    for part in state_key.split(","):
+        prop, sep, value = part.partition("=")
+        if sep:
+            pairs[prop] = value
+    return pairs
 
 
 def load_pack(pack_path: str | Path) -> Textures:
@@ -129,6 +174,7 @@ def _parse_textures(path: Path) -> Textures | None:
             quads_map=quads_map,
             occl_map=occl_map,
             pack_mtime=pack_mtime,
+            states=_state_index(quads_map, occl_map),
         )
     except Exception:
         return None

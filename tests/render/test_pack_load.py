@@ -287,3 +287,135 @@ def test_load_pack_missing_pillow_still_render_error(tmp_path, monkeypatch):
     with pytest.raises(RenderError, match="Pillow is required"):
         load_pack(pack_file)
     assert not (tmp_path / "pack.litematic-tex.npz").exists()
+
+
+# Subset state matching: npz keys are the pack's own (partial) variant
+# keys, so a schematic state with extra properties (waterlogged=false and
+# friends) must still match the most specific key it satisfies.
+
+
+def _partial_key_pack(path):
+    """Pack with two overlapping partial variant keys, distinct textures."""
+    faces_a = {"south": {"texture": "block/tex_a"}}
+    faces_b = {"south": {"texture": "block/tex_b"}}
+    return _make_pack(
+        path,
+        {
+            "assets/minecraft/blockstates/thing.json": json.dumps(
+                {
+                    "variants": {
+                        "facing=north": {"model": "block/a"},
+                        "facing=north,half=bottom": {"model": "block/b"},
+                    }
+                }
+            ),
+            "assets/minecraft/models/block/a.json": json.dumps(
+                {"elements": [{"from": [0] * 3, "to": [16] * 3, "faces": faces_a}]}
+            ),
+            "assets/minecraft/models/block/b.json": json.dumps(
+                {"elements": [{"from": [0] * 3, "to": [16] * 3, "faces": faces_b}]}
+            ),
+            "assets/minecraft/textures/block/tex_a.png": _png((1, 2, 3)),
+            "assets/minecraft/textures/block/tex_b.png": _png((4, 5, 6)),
+        },
+    )
+
+
+def _make_pack(path, entries):
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+    return path
+
+
+def test_quads_match_ignores_extra_state_properties(tmp_path):
+    pack = _mini_pack(tmp_path / "p.zip")
+    entries = {
+        "assets/minecraft/blockstates/thing.json": json.dumps(
+            {"variants": {"facing=north": {"model": "block/thing"}}}
+        ),
+        "assets/minecraft/models/block/thing.json": json.dumps(
+            {
+                "elements": [
+                    {
+                        "from": [0] * 3,
+                        "to": [16] * 3,
+                        "faces": {n: {"texture": "block/stone"} for n in _FACE_NAMES},
+                    }
+                ]
+            }
+        ),
+        "assets/minecraft/textures/block/stone.png": _png((1, 2, 3)),
+    }
+    pack = _make_pack(pack, entries)
+    textures = load_pack(pack)
+    quads = textures.quads(
+        "minecraft:thing", {"facing": "north", "waterlogged": "false"}
+    )
+    assert quads is not None
+    assert len(quads) == 6
+
+
+def test_quads_most_specific_key_wins(tmp_path):
+    textures = load_pack(_partial_key_pack(tmp_path / "p.zip"))
+    quads = textures.quads(
+        "minecraft:thing",
+        {"facing": "north", "half": "bottom", "waterlogged": "false"},
+    )
+    assert quads is not None
+    assert set(str(k) for k in quads["texkey"]) == {"block/tex_b"}
+    loose = textures.quads("minecraft:thing", {"facing": "north"})
+    assert loose is not None
+    assert set(str(k) for k in loose["texkey"]) == {"block/tex_a"}
+
+
+def test_quads_conflicting_value_not_matched(tmp_path):
+    entries = {
+        "assets/minecraft/blockstates/thing.json": json.dumps(
+            {"variants": {"waterlogged=true": {"model": "block/thing"}}}
+        ),
+        "assets/minecraft/models/block/thing.json": json.dumps(
+            {
+                "elements": [
+                    {
+                        "from": [0] * 3,
+                        "to": [16] * 3,
+                        "faces": {n: {"texture": "block/stone"} for n in _FACE_NAMES},
+                    }
+                ]
+            }
+        ),
+        "assets/minecraft/textures/block/stone.png": _png((1, 2, 3)),
+    }
+    textures = load_pack(_make_pack(tmp_path / "p.zip", entries))
+    assert (
+        textures.quads("minecraft:thing", {"waterlogged": "false"}) is None
+    )
+    assert (
+        textures.quads("minecraft:thing", {"waterlogged": "true"}) is not None
+    )
+
+
+def test_occludes_match_ignores_extra_state_properties(tmp_path):
+    pack = _mini_pack(tmp_path / "p.zip")
+    entries = {
+        "assets/minecraft/blockstates/thing.json": json.dumps(
+            {"variants": {"facing=north": {"model": "block/thing"}}}
+        ),
+        "assets/minecraft/models/block/thing.json": json.dumps(
+            {
+                "elements": [
+                    {
+                        "from": [0] * 3,
+                        "to": [16] * 3,
+                        "faces": {n: {"texture": "block/stone"} for n in _FACE_NAMES},
+                    }
+                ]
+            }
+        ),
+        "assets/minecraft/textures/block/stone.png": _png((1, 2, 3)),
+    }
+    textures = load_pack(_make_pack(pack, entries))
+    assert textures.occludes(
+        "minecraft:thing", {"facing": "north", "waterlogged": "false"}
+    )

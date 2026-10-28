@@ -22,6 +22,7 @@ from litematic.render.quads import (
     sort_quads,
     unit_cube_quads,
 )
+from litematic.render.shapes import builtin_quads
 
 __all__ = ["ExtractSummary"]
 
@@ -65,6 +66,13 @@ _FACE_GEOM: dict[int, tuple[tuple[int, int, int], ...]] = {
     TIER_WEST: ((0, 16, 16), (0, 16, 0), (0, 0, 0), (0, 0, 16)),
     TIER_EAST: ((16, 16, 0), (16, 16, 16), (16, 0, 16), (16, 0, 0)),
 }
+# Vanilla element rotation: 90-degree-free angles about one axis through an
+# origin, optionally rescaled on the perpendicular axes by 1/cos(|angle|).
+_ROT_AXIS = {"x": 0, "y": 1, "z": 2}
+_RESCALE_FACTORS = {22.5: 1.0823922, 45.0: 1.4142135}
+# Faces whose normals lie along each axis; a zero-thickness element only
+# keeps these, so degenerate line faces are never emitted.
+_AXIS_FACES = {0: ("west", "east"), 1: ("down", "up"), 2: ("north", "south")}
 
 
 class ExtractSummary(NamedTuple):
@@ -116,9 +124,16 @@ def _extract_pack(
         skipped = 0
         covered: set[str] = set()
         for state_name in state_files:
+            block_id = _block_id(state_name)
             try:
                 states = _extract_block(
-                    archive, names, state_name, model_cache, texture_cache, tex_arrays
+                    archive,
+                    names,
+                    state_name,
+                    block_id,
+                    model_cache,
+                    texture_cache,
+                    tex_arrays,
                 )
             except RenderError:
                 raise
@@ -128,7 +143,6 @@ def _extract_pack(
             if not states:
                 skipped += 1
                 continue
-            block_id = _block_id(state_name)
             covered.add(block_id)
             for state_key, (quads, occl) in states.items():
                 key = f"{block_id}[{state_key}]"
@@ -138,12 +152,22 @@ def _extract_pack(
         for ns, stem in _fallback_blocks(names):
             block_id = f"{ns}:{stem}"
             if block_id in covered:
+                # Blocks with pack quads never fall through to the layers
+                # below; their unmatched states stay for magenta.
                 continue
             array_key = _fallback_array_key(
                 archive, names, ns, stem, texture_cache, tex_arrays
             )
             if array_key is None:
                 continue
+            if builtin_quads(block_id, {}) is not None:
+                # Builtin families never get extraction-side geometry: it
+                # would shadow compose's state-aware builtin step. Their
+                # texture is registered under the canonical block key (raw
+                # plus tint variant above) for compose to backfill.
+                continue
+            # Spec 5.5 texture-direct cube: the last layer before magenta
+            # for blocks the builtin table does not know.
             cube = unit_cube_quads(array_key)
             quad_map[f"{block_id}[]"] = cube
             occl_map[f"{block_id}[]"] = _unit_cube_occl(cube, tex_arrays)
@@ -165,39 +189,52 @@ def _extract_block(
     archive: zipfile.ZipFile,
     names: set[str],
     state_name: str,
+    block_id: str,
     model_cache: dict[str, dict[str, Any] | None],
     texture_cache: dict[str, np.ndarray | None],
     tex_arrays: dict[str, np.ndarray],
 ) -> dict[str, tuple[np.ndarray, bool]]:
     """Extract compiled quads and occl flags for every variant of a state."""
     state = json.loads(archive.read(state_name))
-    variants = _all_variants(state)
-    if not variants:
-        return {}
+    variants, model_refs = _all_variants(state)
     ns = state_name.split("/")[1]
-    block_id = _block_id(state_name)
     result: dict[str, tuple[np.ndarray, bool]] = {}
-    for state_key, variant in variants:
-        x_rot = int(variant.get("x", 0))
-        y_rot = int(variant.get("y", 0))
-        model = _cached_model(archive, names, ns, variant["model"], model_cache)
-        if model is None:
+    for state_key, applies in variants:
+        quads: list[np.ndarray] = []
+        for variant in applies:
+            x_rot = int(variant.get("x", 0))
+            y_rot = int(variant.get("y", 0))
+            model = _cached_model(archive, names, ns, variant["model"], model_cache)
+            if model is None:
+                continue
+            compiled = _variant_quads(
+                archive,
+                names,
+                ns,
+                model,
+                block_id,
+                state_key,
+                x_rot,
+                y_rot,
+                texture_cache,
+                tex_arrays,
+            )
+            if compiled is not None:
+                quads.append(compiled)
+        if not quads:
             continue
-        quads = _variant_quads(
-            archive,
-            names,
-            ns,
-            model,
-            block_id,
-            state_key,
-            x_rot,
-            y_rot,
-            texture_cache,
-            tex_arrays,
+        merged = quads[0] if len(quads) == 1 else np.concatenate(quads)
+        if len(merged) > _QUAD_FUSE:
+            continue
+        result[state_key] = (merged, _unit_cube_occl(merged, tex_arrays))
+    if not result:
+        # No pack geometry (conditional multipart, missing models): resolve
+        # the builtin layer's texture per spec 5.3 so compose's state-aware
+        # builtin step can backfill it under the canonical block key.
+        _register_builtin_texture(
+            archive, names, ns, block_id, model_refs, model_cache,
+            texture_cache, tex_arrays,
         )
-        if quads is None or len(quads) > _QUAD_FUSE:
-            continue
-        result[state_key] = (quads, _unit_cube_occl(quads, tex_arrays))
     return result
 
 
@@ -215,6 +252,10 @@ def _variant_quads(
 ) -> np.ndarray | None:
     """Compile one variant's quads: element boxes, else a stub unit cube."""
     if model["elements"] is None:
+        if model.get("builtin_cut"):
+            # Chains terminated by a builtin/* parent (chests, heads) have
+            # no pack geometry: defer to the builtin shape table.
+            return None
         return _stub_quads(
             archive, names, ns, model, block_id, state_key, texture_cache, tex_arrays
         )
@@ -399,8 +440,8 @@ def _compile_elements(
     y_rot: int,
     texkey_for: Callable[[dict[str, Any], dict[str, str], str], str | None],
 ) -> np.ndarray | None:
-    """Compile box elements into world-space quads for one variant."""
-    rows: list[tuple[Any, Any, str, int]] = []
+    """Compile model elements into world-space quads for one variant."""
+    rows: list[tuple[Any, Any, str, int, bool]] = []
     kx = (int(x_rot) // 90) % 4
     ky = (int(y_rot) // 90) % 4
     for element in elements:
@@ -410,9 +451,23 @@ def _compile_elements(
         faces = element.get("faces")
         if bounds is None or not isinstance(faces, dict):
             continue
+        try:
+            rotation = _element_rotation(element)
+        except ValueError:
+            continue
+        thin = _thin_axes(bounds)
+        if len(thin) > 1:
+            continue
+        rotated = rotation is not None
+        # Zero-thickness planes and rotated elements have non-axis-aligned
+        # or paired back faces: spec marks them dbl (double-sided, no AO).
+        double: bool = bool(thin) or rotated
+        shaded = bool(element.get("shade", True))
         for face_name, tier in _FACE_TIER.items():
             face = faces.get(face_name)
             if not isinstance(face, dict):
+                continue
+            if thin and _VEC[face_name][thin[0]] == 0:
                 continue
             texkey = texkey_for(face, textures, ns)
             if texkey is None:
@@ -421,17 +476,93 @@ def _compile_elements(
             uvs = _face_uvs(face, tier, corners)
             if uvs is None:
                 continue
-            world_tier = _FACE_TIER[_rotate(face_name, x_rot, y_rot)]
-            rows.append((_rotate_corners(corners, kx, ky), uvs, texkey, world_tier))
+            if double or not shaded:
+                shade: int = TIER_UP
+            else:
+                shade = _FACE_TIER[_rotate(face_name, x_rot, y_rot)]
+            if rotation is not None:
+                axis, angle, origin, factor = rotation
+                corners = [
+                    _rotate_element_point(corner, axis, angle, origin, factor)
+                    for corner in corners
+                ]
+            rows.append(
+                (_rotate_corners(corners, kx, ky), uvs, texkey, shade, double)
+            )
     if not rows:
         return None
     quads = np.empty(len(rows), dtype=QUAD_DTYPE)
-    for index, (corners, uvs, texkey, shade) in enumerate(rows):
-        quads[index] = (corners, uvs, texkey, shade, False)
+    for index, (corners, uvs, texkey, shade, dbl) in enumerate(rows):
+        quads[index] = (corners, uvs, texkey, shade, dbl)
     keep = is_parallelogram(quads)
     if not keep.any():
         return None
     return quads[keep]
+
+
+def _thin_axes(
+    bounds: tuple[float, float, float, float, float, float],
+) -> list[int]:
+    """Indices of the axes where from equals to (zero-thickness planes)."""
+    x0, y0, z0, x1, y1, z1 = bounds
+    sizes = (x1 - x0, y1 - y0, z1 - z0)
+    return [axis for axis, size in enumerate(sizes) if size == 0.0]
+
+
+def _element_rotation(
+    element: dict[str, Any],
+) -> tuple[int, float, tuple[float, float, float], float] | None:
+    """Parse rotation into (axis, angle, origin, rescale factor) or None."""
+    rot = element.get("rotation")
+    if rot is None:
+        return None
+    if not isinstance(rot, dict):
+        raise ValueError("element rotation must be a mapping")
+    axis = _ROT_AXIS.get(rot.get("axis", "y"))
+    if axis is None:
+        raise ValueError("element rotation has an unknown axis")
+    angle = rot.get("angle", 0.0)
+    if isinstance(angle, bool) or not isinstance(angle, (int, float)):
+        raise ValueError("element rotation angle must be a number")
+    angle = float(angle)
+    if not -45.0 <= angle <= 45.0 or angle % 22.5 != 0.0:
+        raise ValueError("element rotation angle out of the vanilla set")
+    origin = rot.get("origin", (8.0, 8.0, 8.0))
+    if not isinstance(origin, (list, tuple)) or len(origin) != 3:
+        raise ValueError("element rotation origin must be three numbers")
+    try:
+        point = tuple(float(value) for value in origin)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("element rotation origin must be three numbers") from exc
+    if not all(math.isfinite(value) for value in point):
+        raise ValueError("element rotation origin must be finite")
+    rescale = bool(rot.get("rescale", False))
+    factor = _RESCALE_FACTORS.get(abs(angle), 1.0) if rescale else 1.0
+    return (axis, angle, cast("tuple[float, float, float]", point), factor)
+
+
+def _rotate_element_point(
+    point: tuple[float, float, float],
+    axis: int,
+    angle: float,
+    origin: tuple[float, float, float],
+    factor: float,
+) -> tuple[float, float, float]:
+    """Rotate one point by angle about the axis through origin, rescaled."""
+    rel = [point[i] - origin[i] for i in range(3)]
+    rad = math.radians(angle)
+    cos, sin = math.cos(rad), math.sin(rad)
+    if axis == 0:
+        rel[1], rel[2] = rel[1] * cos - rel[2] * sin, rel[1] * sin + rel[2] * cos
+    elif axis == 1:
+        rel[0], rel[2] = rel[0] * cos + rel[2] * sin, -rel[0] * sin + rel[2] * cos
+    else:
+        rel[0], rel[1] = rel[0] * cos - rel[1] * sin, rel[0] * sin + rel[1] * cos
+    if factor != 1.0:
+        for i in range(3):
+            if i != axis:
+                rel[i] *= factor
+    return (rel[0] + origin[0], rel[1] + origin[1], rel[2] + origin[2])
 
 
 def _element_bounds(
@@ -522,30 +653,117 @@ def _rotate_corners(
     return out
 
 
-def _all_variants(state: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-    out: list[tuple[str, dict[str, Any]]] = []
+def _all_variants(
+    state: dict[str, Any],
+) -> tuple[list[tuple[str, list[dict[str, Any]]]], list[str]]:
+    """Group a state file into (state key applies, model refs).
+
+    Variant keys are alternatives and map to one apply. A multipart carries
+    pack geometry only when every part is unconditional (their union is the
+    vanilla result); conditional parts need a merge contract the v2 spec
+    does not define, so such states defer to the builtin shape table. The
+    model refs cover every referenced model regardless, feeding the spec
+    5.3 texture fallback for deferred states.
+    """
+    out: list[tuple[str, list[dict[str, Any]]]] = []
+    refs: list[str] = []
     variants = state.get("variants")
     if isinstance(variants, dict):
         for key, value in variants.items():
             variant = value[0] if isinstance(value, list) and value else value
             if isinstance(variant, dict) and isinstance(variant.get("model"), str):
-                out.append((_normalize_state_key(key), variant))
-        return out
+                out.append((_normalize_state_key(key), [variant]))
+                refs.append(variant["model"])
+        return out, refs
     multipart = state.get("multipart")
-    if isinstance(multipart, list):
-        chosen = next(
-            (p for p in multipart if isinstance(p, dict) and p.get("when") is None),
-            None,
+    if isinstance(multipart, list) and multipart:
+        parts = [part for part in multipart if isinstance(part, dict)]
+        applies = _multipart_applies(parts)
+        refs.extend(entry["model"] for entry in applies)
+        unconditional = len(parts) == len(multipart) and all(
+            part.get("when") is None for part in parts
         )
-        if chosen is None and multipart and isinstance(multipart[0], dict):
-            chosen = multipart[0]
-        if chosen is not None:
-            apply = chosen.get("apply")
-            if isinstance(apply, list):
-                apply = apply[0] if apply else None
-            if isinstance(apply, dict) and isinstance(apply.get("model"), str):
-                out.append(("", apply))
-    return out
+        if unconditional and applies:
+            out.append(("", applies))
+    return out, refs
+
+
+def _multipart_applies(
+    parts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Collect the apply model refs of every multipart part."""
+    applies: list[dict[str, Any]] = []
+    for part in parts:
+        apply = part.get("apply")
+        entries = apply if isinstance(apply, list) else [apply]
+        for entry in entries:
+            if isinstance(entry, dict) and isinstance(entry.get("model"), str):
+                applies.append(entry)
+    return applies
+
+
+def _register_builtin_texture(
+    archive: zipfile.ZipFile,
+    names: set[str],
+    ns: str,
+    block_id: str,
+    model_refs: list[str],
+    model_cache: dict[str, dict[str, Any] | None],
+    texture_cache: dict[str, np.ndarray | None],
+    tex_arrays: dict[str, np.ndarray],
+) -> None:
+    """Register the builtin layer texture under the block's canonical key.
+
+    Spec 5.3 chain: the block's own model textures first, then
+    textures/block/<stem>.png; unresolved blocks stay for magenta.
+    """
+    raw = _first_model_texture(
+        archive, names, ns, model_refs, model_cache, texture_cache
+    )
+    stem = block_id.partition(":")[2]
+    tex_key = _texture_key(f"block/{stem}", ns)
+    if raw is None:
+        raw = _load_texture(
+            archive, names, ns, f"block/{stem}", tex_key, texture_cache
+        )
+    if raw is None:
+        return
+    tex_arrays.setdefault(tex_key, raw)
+    tint = _tint_for(block_id, "")
+    if tint is not None:
+        array_key = f"{tex_key}@{tint[0]},{tint[1]},{tint[2]}"
+        if array_key not in tex_arrays:
+            tex_arrays[array_key] = _apply_tint(raw, tint)
+
+
+def _first_model_texture(
+    archive: zipfile.ZipFile,
+    names: set[str],
+    ns: str,
+    model_refs: list[str],
+    model_cache: dict[str, dict[str, Any] | None],
+    texture_cache: dict[str, np.ndarray | None],
+) -> np.ndarray | None:
+    """First loadable concrete texture among the referenced models."""
+    for ref in model_refs:
+        model = _cached_model(archive, names, ns, ref, model_cache)
+        if model is None:
+            continue
+        for value in model["textures"].values():
+            tex_ref = _resolve_ref(value, model["textures"])
+            if tex_ref is None:
+                continue
+            raw = _load_texture(
+                archive,
+                names,
+                ns,
+                tex_ref,
+                _texture_key(tex_ref, ns),
+                texture_cache,
+            )
+            if raw is not None:
+                return raw
+    return None
 
 
 def _normalize_state_key(key: str) -> str:
@@ -577,6 +795,7 @@ def _cached_model(
                     "textures": model["textures"],
                     "elements": None,
                     "stub_ref": stub_ref,
+                    "builtin_cut": bool(model.get("builtin_cut")),
                 }
             )
         else:
@@ -625,7 +844,13 @@ def _resolve_model(
         ref = parent if isinstance(parent, str) else None
     if elements is None:
         if ref is not None:
-            return None
+            # Chain terminated at a builtin/* parent: no pack geometry, but
+            # the merged textures still feed the spec 5.3 texture fallback.
+            return {
+                "textures": merged_textures,
+                "elements": None,
+                "builtin_cut": True,
+            }
         return {"textures": merged_textures, "elements": None}
     return {"textures": merged_textures, "elements": elements}
 

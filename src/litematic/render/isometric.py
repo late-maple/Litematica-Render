@@ -6,6 +6,7 @@ import numpy as np
 
 from litematic.parse.model import Litematic
 from litematic.render.errors import RenderError
+from litematic.render.extract import _tint_for
 from litematic.render.pack import Textures
 from litematic.render.quads import (
     AO_LEVELS,
@@ -250,28 +251,132 @@ def _state_quads(state, textures: Textures) -> np.ndarray:
     for props in variants:
         built = builtin_quads(state.name, props)
         if built is not None:
-            key = _builtin_texkey(state.name)
-            if key in textures.arrays:
-                built["texkey"] = key
+            if _backfill_builtin(state.name, built, textures.arrays):
                 return built
             break
     return unit_cube_quads(_MAGENTA_TEXKEY)
+
+
+# Vanilla base-material texture conventions for model-less packs (v2.1
+# extension point, hand-maintained): family suffix stripped to the base
+# material, woods to their planks, dye carpets to wool, plus the vanilla
+# plural form as a second candidate. Longest suffixes must come first.
+_FAMILY_SUFFIXES: tuple[str, ...] = (
+    "_pressure_plate",
+    "_fence_gate",
+    "_wall_banner",
+    "_wall_sign",
+    "_trapdoor",
+    "_button",
+    "_stairs",
+    "_fence",
+    "_carpet",
+    "_slab",
+    "_wall",
+    "_sign",
+    "_banner",
+    "_door",
+)
+_WOODS = frozenset(
+    {
+        "oak",
+        "spruce",
+        "birch",
+        "jungle",
+        "acacia",
+        "dark_oak",
+        "mangrove",
+        "cherry",
+        "bamboo",
+        "crimson",
+        "warped",
+    }
+)
+_DYES = frozenset(
+    {
+        "white",
+        "orange",
+        "magenta",
+        "light_blue",
+        "yellow",
+        "lime",
+        "pink",
+        "gray",
+        "light_gray",
+        "cyan",
+        "purple",
+        "blue",
+        "brown",
+        "green",
+        "red",
+        "black",
+    }
+)
+
+
+def _backfill_builtin(
+    name: str, quads: np.ndarray, arrays: dict[str, np.ndarray]
+) -> bool:
+    """Fill builtin quads' texkeys from direct, then material, keys.
+
+    Direct matches (same-name plus tint variant, extraction-registered)
+    always win; the vanilla naming conventions fire only when no direct
+    texture exists, and unresolved families fall through to magenta.
+    """
+    ns, _, stem = name.partition(":")
+    prefix = "" if ns in ("", "minecraft") else f"{ns}:"
+    base = f"{prefix}block/{stem or name}"
+    tint = _tint_for(name, "")
+    direct = [base]
+    if tint is not None:
+        direct.insert(0, f"{base}@{tint[0]},{tint[1]},{tint[2]}")
+    for key in direct:
+        if key in arrays:
+            quads["texkey"] = key
+            return True
+    door = _door_texkeys(prefix, stem)
+    if door is not None and all(key in arrays for key in door):
+        quads["texkey"] = np.where(
+            quads["vtx"][..., 1].mean(axis=1) >= 8.0, door[0], door[1]
+        )
+        return True
+    for key in _material_keys(prefix, stem):
+        if key in arrays:
+            quads["texkey"] = key
+            return True
+    return False
+
+
+def _door_texkeys(prefix: str, stem: str) -> tuple[str, str] | None:
+    """(top, bottom) texture keys for a vanilla door stem, else None."""
+    if not stem.endswith("_door"):
+        return None
+    material = stem[: -len("_door")]
+    return (
+        f"{prefix}block/{material}_door_top",
+        f"{prefix}block/{material}_door_bottom",
+    )
+
+
+def _material_keys(prefix: str, stem: str) -> tuple[str, ...]:
+    """Ordered base-material texture keys per vanilla naming rules."""
+    for suffix in _FAMILY_SUFFIXES:
+        if stem.endswith(suffix):
+            material = stem[: -len(suffix)]
+            break
+    else:
+        return ()
+    if material in _WOODS:
+        return (f"{prefix}block/{material}_planks",)
+    if suffix == "_carpet" and material in _DYES:
+        return (f"{prefix}block/{material}_wool",)
+    return (f"{prefix}block/{material}", f"{prefix}block/{material}s")
 
 
 def _state_is_magenta(state, textures: Textures) -> bool:
     """True when compose resolves this state to the magenta fallback cube."""
     quads = _state_quads(state, textures)
     return bool(np.any(quads["texkey"] == _MAGENTA_TEXKEY))
-
-
-def _builtin_texkey(name: str) -> str:
-    """Texture array key for a block's canonical block/<stem> texture."""
-    ns, _, stem = name.partition(":")
-    if not stem:
-        return f"block/{name}"
-    if ns == "minecraft":
-        return f"block/{stem}"
-    return f"{ns}:block/{stem}"
 
 
 def _texkey_ids(

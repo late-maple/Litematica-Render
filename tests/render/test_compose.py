@@ -1,11 +1,14 @@
 """Scene composition contract: quad expansion, yaw remap, culling, AO."""
 
+import json
+import zipfile
+
 import numpy as np
 from helpers.litematica_packer import build_litematic_bytes
 
 from litematic import loads
 from litematic.render.isometric import _MAGENTA_TEXKEY, _compose
-from litematic.render.pack import Textures
+from litematic.render.pack import Textures, load_pack
 from litematic.render.quads import (
     QUAD_DTYPE,
     TIER_EAST,
@@ -261,13 +264,13 @@ def test_builtin_uses_block_named_texture():
     assert scene.quad_dbl.tolist() == [False, False, False]
 
 
-def test_builtin_without_block_texture_falls_to_magenta():
+def test_builtin_slab_uses_planks_material_convention():
     tex = _textures(True)
     tex.arrays["block/oak_planks"] = np.full(
         (16, 16, 4), (156, 127, 78, 255), np.uint8
     )
     scene = _compose(_single_block("minecraft:oak_slab"), 0, tex)
-    assert list(scene.texkeys) == [_MAGENTA_TEXKEY]
+    assert list(scene.texkeys) == ["block/oak_planks"]
     assert len(scene.quad_shade) == 3
 
 
@@ -299,3 +302,273 @@ def test_all_air_returns_empty_scene():
     assert len(scene.quad_shade) == 0
     assert (scene.span_w, scene.span_h) == (2, 4)
     assert scene.texkeys == {}
+
+
+def test_dbl_quads_keep_full_ao_next_to_occluders():
+    """Spec 3: double-sided quads never take vertex AO."""
+    plant = np.empty(2, QUAD_DTYPE)
+    plant["vtx"] = [
+        [(0, 0, 0), (16, 0, 16), (16, 16, 16), (0, 16, 0)],
+        [(16, 0, 0), (0, 0, 16), (0, 16, 16), (16, 16, 0)],
+    ]
+    plant["uv"] = [[(0, 0), (16, 0), (16, 16), (0, 16)]] * 2
+    plant["texkey"] = "block/stone"
+    plant["shade"] = TIER_UP
+    plant["dbl"] = True
+    tex = Textures(
+        version="pack-quads",
+        arrays={"block/stone": np.full((16, 16, 4), _STONE, np.uint8)},
+        quads_map={
+            "minecraft:short_grass[]": plant,
+            "minecraft:stone[]": unit_cube_quads("block/stone"),
+        },
+        occl_map={"minecraft:short_grass[]": False, "minecraft:stone[]": True},
+        pack_mtime=0.0,
+    )
+    palette = [
+        ("minecraft:air", {}),
+        ("minecraft:stone", {}),
+        ("minecraft:short_grass", {}),
+    ]
+    indices = np.ones(9, dtype=np.uint16)
+    indices[4] = 2  # plant in the middle of a 3x3 stone floor
+    schem = _schematic([("Main", (0, 0, 0), (3, 1, 3), palette, indices)])
+    scene = _compose(schem, 0, tex)
+    cell = (scene.x == 1) & (scene.y == 0) & (scene.z == 1)
+    assert cell.any()
+    assert scene.quad_dbl[cell].all()
+    assert (scene.quad_ao[cell] == np.float32(1.0)).all()
+
+
+# Round-2 layering: real packs reach compose's state-aware builtin with a
+# texture extraction registered under the canonical block key.
+
+
+def _fence_pack(path):
+    """Vanilla-named oak fence: conditional multipart over planks models."""
+    model = json.dumps(
+        {
+            "textures": {"planks": "block/oak_planks"},
+            "elements": [
+                {
+                    "from": [0, 0, 0],
+                    "to": [16, 16, 16],
+                    "faces": {
+                        "north": {"texture": "#planks"},
+                        "south": {"texture": "#planks"},
+                        "east": {"texture": "#planks"},
+                        "west": {"texture": "#planks"},
+                    },
+                }
+            ],
+        }
+    )
+    entries = {
+        "assets/minecraft/blockstates/oak_fence.json": json.dumps(
+            {
+                "multipart": [
+                    {"apply": {"model": "block/fence_post"}},
+                    {"when": {"north": "true"}, "apply": {"model": "block/fence_side"}},
+                    {"when": {"east": "true"}, "apply": {"model": "block/fence_side"}},
+                ]
+            }
+        ),
+        "assets/minecraft/models/block/fence_post.json": model,
+        "assets/minecraft/models/block/fence_side.json": model,
+        "assets/minecraft/textures/block/oak_planks.png": _png_bytes(
+            (168, 90, 50)
+        ),
+    }
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+    return path
+
+
+def _png_bytes(color):
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGBA", (16, 16), (*color, 255)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_real_pack_fence_connection_geometry(tmp_path):
+    textures = load_pack(_fence_pack(tmp_path / "fence.zip"))
+    alone = _compose(
+        _single_block(
+            "minecraft:oak_fence",
+            {
+                "north": "false",
+                "south": "false",
+                "east": "false",
+                "west": "false",
+                "waterlogged": "false",
+            },
+        ),
+        0,
+        textures,
+    )
+    linked = _compose(
+        _single_block(
+            "minecraft:oak_fence",
+            {
+                "north": "true",
+                "south": "false",
+                "east": "true",
+                "west": "false",
+                "waterlogged": "false",
+            },
+        ),
+        0,
+        textures,
+    )
+    assert len(alone.quad_shade) == 3  # post only
+    # Two rails per connected side: post + 2x2 arm boxes, 3 faces each.
+    assert len(linked.quad_shade) == 15
+    assert _MAGENTA_TEXKEY not in alone.texkeys
+    assert _MAGENTA_TEXKEY not in linked.texkeys
+
+
+def test_real_pack_pure_texture_cross_plant_tinted(tmp_path):
+    from litematic.render.pack import load_pack
+
+    with zipfile.ZipFile(tmp_path / "grass.zip", "w") as zf:
+        zf.writestr(
+            "assets/minecraft/textures/block/short_grass.png",
+            _png_bytes((98, 158, 68)),
+        )
+    textures = load_pack(tmp_path / "grass.zip")
+    scene = _compose(_single_block("minecraft:short_grass"), 0, textures)
+    assert len(scene.quad_shade) == 2
+    assert scene.quad_dbl.all()
+    assert list(scene.texkeys) == ["block/short_grass@145,189,89"]
+
+
+# Vanilla base-material texture conventions for model-less packs
+# (escalation ruling: supersedes the Task 6 no-family-mapping exclusion).
+# Rules fire only when no pack model quads and no same-name texture exist.
+
+
+def _texture_only_pack(path, textures):
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, color in textures.items():
+            zf.writestr(
+                f"assets/minecraft/textures/block/{name}.png",
+                _png_bytes(color),
+            )
+    return path
+
+
+def _scene_texkey_of(scene):
+    assert _MAGENTA_TEXKEY not in scene.texkeys
+    return list(scene.texkeys)[0]
+
+
+def test_model_less_stairs_uses_planks_material(tmp_path):
+    pack = _texture_only_pack(
+        tmp_path / "p.zip", {"oak_planks": (160, 130, 80)}
+    )
+    textures = load_pack(pack)
+    scene = _compose(
+        _single_block(
+            "minecraft:oak_stairs",
+            {"facing": "north", "half": "bottom", "shape": "straight"},
+        ),
+        0,
+        textures,
+    )
+    assert _scene_texkey_of(scene) == "block/oak_planks"
+
+
+def test_model_less_plural_material_convention(tmp_path):
+    pack = _texture_only_pack(tmp_path / "p.zip", {"stone_bricks": (120, 120, 120)})
+    textures = load_pack(pack)
+    scene = _compose(
+        _single_block(
+            "minecraft:stone_brick_stairs",
+            {"facing": "north", "half": "bottom", "shape": "straight"},
+        ),
+        0,
+        textures,
+    )
+    assert _scene_texkey_of(scene) == "block/stone_bricks"
+
+
+def test_model_less_wall_uses_material(tmp_path):
+    pack = _texture_only_pack(tmp_path / "p.zip", {"cobblestone": (110, 110, 110)})
+    textures = load_pack(pack)
+    scene = _compose(
+        _single_block(
+            "minecraft:cobblestone_wall",
+            {"up": "true", "north": "none", "south": "none", "east": "none",
+             "west": "none"},
+        ),
+        0,
+        textures,
+    )
+    assert _scene_texkey_of(scene) == "block/cobblestone"
+
+
+def test_model_less_carpet_uses_wool(tmp_path):
+    pack = _texture_only_pack(tmp_path / "p.zip", {"red_wool": (200, 40, 40)})
+    textures = load_pack(pack)
+    scene = _compose(_single_block("minecraft:red_carpet"), 0, textures)
+    assert _scene_texkey_of(scene) == "block/red_wool"
+
+
+def test_model_less_door_splits_top_bottom(tmp_path):
+    pack = _texture_only_pack(
+        tmp_path / "p.zip",
+        {"oak_door_top": (200, 170, 120), "oak_door_bottom": (150, 110, 70)},
+    )
+    textures = load_pack(pack)
+    scene = _compose(
+        _single_block(
+            "minecraft:oak_door",
+            {"half": "lower", "facing": "east", "hinge": "left",
+             "open": "false", "powered": "false"},
+        ),
+        0,
+        textures,
+    )
+    keys = set(scene.texkeys)
+    assert keys == {"block/oak_door_top", "block/oak_door_bottom"}
+    table = list(scene.texkeys)
+    upper = scene.quad_ao[
+        np.isin(scene.texkey_ids, [table.index("block/oak_door_top")])
+    ]
+    assert len(upper) > 0
+
+
+def test_direct_texture_never_overridden_by_convention(tmp_path):
+    pack = _texture_only_pack(
+        tmp_path / "p.zip",
+        {"oak_stairs": (10, 20, 30), "oak_planks": (160, 130, 80)},
+    )
+    textures = load_pack(pack)
+    scene = _compose(
+        _single_block(
+            "minecraft:oak_stairs",
+            {"facing": "north", "half": "bottom", "shape": "straight"},
+        ),
+        0,
+        textures,
+    )
+    assert _scene_texkey_of(scene) == "block/oak_stairs"
+
+
+def test_model_less_missing_material_stays_magenta(tmp_path):
+    pack = _texture_only_pack(tmp_path / "p.zip", {"stone": (125, 125, 125)})
+    textures = load_pack(pack)
+    scene = _compose(
+        _single_block(
+            "minecraft:oak_stairs",
+            {"facing": "north", "half": "bottom", "shape": "straight"},
+        ),
+        0,
+        textures,
+    )
+    assert _MAGENTA_TEXKEY in scene.texkeys
