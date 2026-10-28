@@ -46,3 +46,16 @@ def test_encoding_is_deterministic():
 def test_rejects_invalid_input(bad):
     with pytest.raises(RenderError, match="encode:"):
         encode_png(bad)
+
+
+@pytest.mark.parametrize(
+    "empty",
+    [
+        np.zeros((0, 0, 4), dtype=np.uint8),
+        np.zeros((3, 0, 4), dtype=np.uint8),
+        np.zeros((0, 3, 4), dtype=np.uint8),
+    ],
+)
+def test_rejects_empty_image(empty):
+    with pytest.raises(RenderError, match="encode:"):
+        encode_png(empty)

@@ -24,6 +24,7 @@ def encode_png(image: np.ndarray) -> bytes:
         or image.dtype != np.uint8
         or image.ndim != 3
         or image.shape[2] != 4
+        or min(image.shape[:2]) < 1
     ):
         raise RenderError(
             "encode: expected (H, W, 4) uint8 array, got "
