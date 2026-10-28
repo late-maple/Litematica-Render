@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from litematic.parse.model import BlockState
-from litematic.render.isometric import (
+from litematic.render.templates import (
     SHAPE_CUBE,
     SHAPE_SLAB_BOTTOM,
     SHAPE_SLAB_TOP,

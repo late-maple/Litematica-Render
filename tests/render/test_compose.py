@@ -4,13 +4,13 @@ import numpy as np
 from helpers.litematica_packer import build_litematic_bytes
 
 from litematic import loads
-from litematic.render.isometric import (
+from litematic.render.isometric import _compose
+from litematic.render.pack import Textures
+from litematic.render.templates import (
     SHAPE_CUBE,
     SHAPE_SLAB_BOTTOM,
     SHAPE_SLAB_TOP,
-    _compose,
 )
-from litematic.render.pack import Textures
 
 _FACES = ("up", "east", "south", "down", "north", "west")
 

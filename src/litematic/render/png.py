@@ -13,12 +13,7 @@ _SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 def encode_png(image: np.ndarray) -> bytes:
-    """Encode an (H, W, 4) uint8 RGBA array as PNG bytes.
-
-    RGB channels of fully transparent pixels are zeroed before encoding
-    so identical-looking images produce identical bytes. Raises
-    RenderError for any other dtype or shape.
-    """
+    """Encode (H, W, 4) uint8 RGBA as PNG; zero transparent RGB; raises RenderError."""
     if (
         not isinstance(image, np.ndarray)
         or image.dtype != np.uint8
