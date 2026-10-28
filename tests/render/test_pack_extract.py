@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 
 from litematic.render.errors import RenderError
-from litematic.render.pack import ExtractSummary, _extract_pack
+from litematic.render.extract import ExtractSummary, _extract_pack
 
 
 def _solid_png(color, size=(16, 16)):
