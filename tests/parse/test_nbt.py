@@ -7,7 +7,7 @@ import pytest
 from helpers.nbt_writer import Byte, Double, Float, Long, Short, write_nbt
 
 from litematic import NbtError
-from litematic.nbt import read_nbt
+from litematic.parse.nbt import read_nbt
 
 TREE = {
     "DataVersion": 3337,

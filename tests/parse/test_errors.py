@@ -21,4 +21,4 @@ def test_base_class_catches_subclasses(sub):
 
 
 def test_version_string():
-    assert litematic.__version__ == "0.1.0"
+    assert litematic.__version__ == "0.2.0"

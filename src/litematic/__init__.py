@@ -4,8 +4,8 @@ Instances are not thread-safe: parse and query a Litematic from a single
 thread or asyncio task at a time.
 """
 
-from litematic.errors import LitematicError, LitematicFormatError, NbtError
-from litematic.model import (
+from litematic.parse.errors import LitematicError, LitematicFormatError, NbtError
+from litematic.parse.model import (
     BlockEntity,
     BlockState,
     Entity,
@@ -14,9 +14,9 @@ from litematic.model import (
     Region,
     Vec3i,
 )
-from litematic.parser import load, loads
+from litematic.parse.parser import load, loads
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "BlockEntity",

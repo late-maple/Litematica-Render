@@ -8,7 +8,7 @@ from typing import Protocol
 
 import numpy as np
 
-from litematic.errors import NbtError
+from litematic.parse.errors import NbtError
 
 _GZIP_MAGIC = b"\x1f\x8b"
 

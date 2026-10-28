@@ -11,7 +11,7 @@ license = "MIT"
 dependencies = ["numpy"]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff", "mypy"]
+dev = ["pytest", "ruff", "mypy", "Pillow"]
 
 [tool.hatch.version]
 path = "src/litematic/__init__.py"

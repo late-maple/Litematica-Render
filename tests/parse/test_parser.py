@@ -6,8 +6,8 @@ from helpers.litematica_packer import build_litematic_bytes
 from helpers.nbt_writer import write_nbt
 
 from litematic import LitematicError, LitematicFormatError
-from litematic.model import BlockState, Vec3i
-from litematic.parser import load, loads
+from litematic.parse.model import BlockState, Vec3i
+from litematic.parse.parser import load, loads
 
 PALETTE = [
     ("minecraft:air", {}),

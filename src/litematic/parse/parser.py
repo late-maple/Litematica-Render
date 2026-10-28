@@ -6,8 +6,8 @@ from typing import Callable, Mapping, Optional
 
 import numpy as np
 
-from litematic.errors import LitematicError, LitematicFormatError
-from litematic.model import (
+from litematic.parse.errors import LitematicError, LitematicFormatError
+from litematic.parse.model import (
     BlockEntity,
     BlockState,
     Entity,
@@ -16,7 +16,7 @@ from litematic.model import (
     Region,
     Vec3i,
 )
-from litematic.nbt import read_nbt
+from litematic.parse.nbt import read_nbt
 
 
 def _bits_for(palette_size: int) -> int:

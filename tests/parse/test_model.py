@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from litematic.model import (
+from litematic.parse.model import (
     BlockState,
     Litematic,
     LitematicMetadata,

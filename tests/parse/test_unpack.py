@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 from helpers.litematica_packer import pack_indices
 
-from litematic.model import Vec3i
-from litematic.parser import _bits_for, _unpack_indices
+from litematic.parse.model import Vec3i
+from litematic.parse.parser import _bits_for, _unpack_indices
 
 
 def test_bits_for_boundaries():
