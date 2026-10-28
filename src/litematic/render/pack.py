@@ -9,12 +9,13 @@ import numpy as np
 
 from litematic.render.errors import RenderError
 from litematic.render.extract import (
+    _NPZ_VERSION,
     _TEX_SIZE,
-    _WORLD_FACES,
     _CacheWriteError,
     _extract_pack,
     _normalize_state_key,
 )
+from litematic.render.quads import QUAD_DTYPE
 
 __all__ = ["Textures", "load_pack"]
 
@@ -22,27 +23,31 @@ _CACHE_SUFFIX = ".litematic-tex.npz"
 
 
 class Textures(NamedTuple):
-    """Pack textures resolved from the extraction cache."""
+    """Pack textures and per-state quads resolved from the extraction cache."""
 
     version: str
     arrays: dict[str, np.ndarray]
-    maps: dict[str, dict[str, str]]
+    quads_map: dict[str, np.ndarray]
+    occl_map: dict[str, bool]
     pack_mtime: float
 
-    def faces(
+    def quads(
         self, name: str, properties: Mapping[str, str]
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-        """Return up/east/south arrays for a block state, [] as fallback."""
+    ) -> np.ndarray | None:
+        """Return the state's QUAD_DTYPE quads, [] key as fallback."""
         for state_key in (_state_key_of(properties), ""):
-            entry = self.maps.get(f"{name}[{state_key}]")
-            if entry is None or any(f not in entry for f in _WORLD_FACES):
-                continue
-            up = self.arrays.get(entry["up"])
-            east = self.arrays.get(entry["east"])
-            south = self.arrays.get(entry["south"])
-            if up is not None and east is not None and south is not None:
-                return (up, east, south)
+            entry = self.quads_map.get(f"{name}[{state_key}]")
+            if entry is not None:
+                return entry
         return None
+
+    def occludes(self, name: str, properties: Mapping[str, str]) -> bool:
+        """Return the state's opaque-cube flag; missing entries are False."""
+        for state_key in (_state_key_of(properties), ""):
+            flag = self.occl_map.get(f"{name}[{state_key}]")
+            if flag is not None:
+                return flag
+        return False
 
 
 def _state_key_of(properties: Mapping[str, str]) -> str:
@@ -80,7 +85,11 @@ def _read_cache(cache: Path, mtime: float) -> Textures | None:
     if not cache.is_file():
         return None
     parsed = _parse_textures(cache)
-    if parsed is None or parsed.version != "pack" or parsed.pack_mtime != mtime:
+    if (
+        parsed is None
+        or parsed.version != _NPZ_VERSION
+        or parsed.pack_mtime != mtime
+    ):
         return None
     return parsed
 
@@ -91,18 +100,35 @@ def _parse_textures(path: Path) -> Textures | None:
             version = str(data["meta/version"].item())
             pack_mtime = float(data["meta/pack_mtime"].item())
             arrays: dict[str, np.ndarray] = {}
-            maps: dict[str, dict[str, str]] = {}
+            quads_map: dict[str, np.ndarray] = {}
+            occl_map: dict[str, bool] = {}
             for key in data.files:
                 if key.startswith("tex/"):
                     array = data[key]
                     if array.shape == (_TEX_SIZE, _TEX_SIZE, 4):
                         if array.dtype == np.uint8:
                             arrays[key[len("tex/") :]] = array
-                elif key.startswith("map/"):
-                    block_state, _, face = key[len("map/") :].rpartition("/")
-                    maps.setdefault(block_state, {})[face] = str(data[key].item())
+                elif key.startswith("quads/"):
+                    array = data[key]
+                    if array.ndim == 1 and array.dtype == QUAD_DTYPE:
+                        quads_map[key[len("quads/") :]] = array
+                elif key.startswith("occl/"):
+                    array = data[key]
+                    if array.shape == () and array.dtype == np.uint8:
+                        occl_map[key[len("occl/") :]] = bool(array.item())
+        # A quads entry referencing an unknown tex array is unusable; drop
+        # it so the render pipeline degrades to builtin shapes or magenta.
+        quads_map = {
+            key: value
+            for key, value in quads_map.items()
+            if {str(quad["texkey"]) for quad in value} <= arrays.keys()
+        }
         return Textures(
-            version=version, arrays=arrays, maps=maps, pack_mtime=pack_mtime
+            version=version,
+            arrays=arrays,
+            quads_map=quads_map,
+            occl_map=occl_map,
+            pack_mtime=pack_mtime,
         )
     except Exception:
         return None

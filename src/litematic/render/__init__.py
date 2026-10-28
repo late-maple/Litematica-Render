@@ -93,7 +93,8 @@ def unresolved_colors(
 ) -> set[str]:
     """Return block names the pack cannot cover; these render magenta."""
     textures = load_pack(_require_pack(textures_path))
-    covered = {key.split("[", 1)[0] for key in textures.maps}
+    # Pack-level coverage only; compose-time fallbacks land with Task 6/8.
+    covered = {key.split("[", 1)[0] for key in textures.quads_map}
     names = {
         state.name
         for region in schem.regions.values()

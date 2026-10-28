@@ -22,7 +22,9 @@ from litematic.render.quads import (
     TIER_EAST,
     TIER_NORTH,
     TIER_SOUTH,
+    TIER_UP,
     TIER_WEST,
+    sort_quads,
     unit_cube_quads,
 )
 
@@ -72,14 +74,26 @@ def _blockstates(model, x=None, y=None):
     return _blockstates_variants({"": variant})
 
 
-def _model(faces, textures=None, parent=None):
+def _model(faces, textures=None, parent=None, to=(16, 16, 16)):
     model = {}
     if parent is not None:
         model["parent"] = parent
     if textures is not None:
         model["textures"] = textures
-    model["elements"] = [{"from": [0, 0, 0], "to": [16, 16, 16], "faces": faces}]
+    model["elements"] = [{"from": [0, 0, 0], "to": list(to), "faces": faces}]
     return json.dumps(model)
+
+
+def _two_box_model(faces):
+    """Build a model with two stacked unit-cube box elements."""
+    return json.dumps(
+        {
+            "elements": [
+                {"from": [0, 0, 0], "to": [16, 16, 16], "faces": faces},
+                {"from": [0, 0, 0], "to": [16, 16, 16], "faces": faces},
+            ]
+        }
+    )
 
 
 def _all_faces(ref="#all"):
@@ -115,8 +129,10 @@ def _load_npz(dest):
     return np.load(dest, allow_pickle=False)
 
 
-def _ref(data, block, state, face):
-    return data[f"map/{block}[{state}]/{face}"].item()
+def _quad_ref(data, block, state, tier):
+    """Return the texkey of the block state's quad on one face tier."""
+    quads = data[f"quads/{block}[{state}]"]
+    return str(next(q["texkey"] for q in quads if int(q["shade"]) == tier))
 
 
 def _tex(data, key):
@@ -130,14 +146,15 @@ def test_plain_block_stateless_entry(tmp_path):
     assert summary.blocks == 1
     assert summary.skipped == 0
     data = _load_npz(dest)
-    assert _ref(data, "minecraft:stone", "", "up") == "block/stone"
+    assert data["meta/version"].item() == "pack-quads"
+    quads = data["quads/minecraft:stone[]"]
+    assert quads.dtype == QUAD_DTYPE
+    assert quads["texkey"].tolist() == ["block/stone"] * 6
     tex = _tex(data, "block/stone")
     assert tex.shape == (16, 16, 4)
     assert tex.dtype == np.uint8
     assert (tex == (200, 30, 30, 255)).all()
-    for face in ("down", "up", "north", "south", "west", "east"):
-        assert f"map/minecraft:stone[]/{face}" in data.files
-    assert data["meta/version"].item() == "pack"
+    assert int(data["occl/minecraft:stone[]"].item()) == 1
 
 
 def test_hash_ref_resolves_through_model_textures(tmp_path):
@@ -155,8 +172,10 @@ def test_hash_ref_resolves_through_model_textures(tmp_path):
         "assets/minecraft/textures/block/end_tex.png": _solid_png((4, 5, 6, 255)),
     }
     data = _load_npz(_extract(tmp_path, entries))
-    assert _ref(data, "minecraft:pillar", "", "up") == "block/end_tex"
-    assert _ref(data, "minecraft:pillar", "", "east") == "block/side_tex"
+    quads = data["quads/minecraft:pillar[]"]
+    by_tier = {int(q["shade"]): str(q["texkey"]) for q in quads}
+    assert by_tier[TIER_UP] == "block/end_tex"
+    assert by_tier[TIER_EAST] == "block/side_tex"
     assert (_tex(data, "block/end_tex") == (4, 5, 6, 255)).all()
 
 
@@ -173,11 +192,9 @@ def test_parent_chain_merge_child_overrides(tmp_path):
         "assets/minecraft/textures/block/new.png": _solid_png((7, 7, 7, 255)),
     }
     data = _load_npz(_extract(tmp_path, entries))
-    assert _ref(data, "minecraft:child", "", "up") == "block/new"
-    assert all(
-        _ref(data, "minecraft:child", "", face) == "block/new"
-        for face in ("up", "down", "north", "south", "west", "east")
-    )
+    quads = data["quads/minecraft:child[]"]
+    assert {str(k) for k in quads["texkey"]} == {"block/new"}
+    assert (_tex(data, "block/new") == (7, 7, 7, 255)).all()
 
 
 def test_variant_y_rotation_swaps_faces(tmp_path):
@@ -192,9 +209,11 @@ def test_variant_y_rotation_swaps_faces(tmp_path):
             (10, 20, value, 255)
         )
     data = _load_npz(_extract(tmp_path, entries))
-    assert _ref(data, "minecraft:front", "", "east") == "block/north_tex"
-    assert _ref(data, "minecraft:front", "", "south") == "block/east_tex"
-    assert _ref(data, "minecraft:front", "", "up") == "block/up_tex"
+    quads = data["quads/minecraft:front[]"]
+    by_tier = {int(q["shade"]): str(q["texkey"]) for q in quads}
+    assert by_tier[TIER_EAST] == "block/north_tex"
+    assert by_tier[TIER_SOUTH] == "block/east_tex"
+    assert by_tier[TIER_UP] == "block/up_tex"
 
 
 def test_all_variants_extracted_per_state(tmp_path):
@@ -217,9 +236,13 @@ def test_all_variants_extracted_per_state(tmp_path):
         "assets/minecraft/textures/block/side_tex.png": _solid_png((1, 1, 1, 255)),
     }
     data = _load_npz(_extract(tmp_path, entries))
-    assert _ref(data, "minecraft:furnace", "facing=south", "south") == "block/front_tex"
-    assert _ref(data, "minecraft:furnace", "facing=north", "north") == "block/front_tex"
-    assert _ref(data, "minecraft:furnace", "facing=north", "east") == "block/side_tex"
+    south = data["quads/minecraft:furnace[facing=south]"]
+    by_tier = {int(q["shade"]): str(q["texkey"]) for q in south}
+    assert by_tier[TIER_SOUTH] == "block/front_tex"
+    north = data["quads/minecraft:furnace[facing=north]"]
+    by_tier = {int(q["shade"]): str(q["texkey"]) for q in north}
+    assert by_tier[TIER_NORTH] == "block/front_tex"
+    assert by_tier[TIER_EAST] == "block/side_tex"
 
 
 def test_state_key_pairs_sorted_by_property_name(tmp_path):
@@ -228,7 +251,7 @@ def test_state_key_pairs_sorted_by_property_name(tmp_path):
         {"shape=straight,half=bottom,facing=east": {"model": "block/stone"}}
     )
     data = _load_npz(_extract(tmp_path, entries))
-    key = "map/minecraft:unsorted[facing=east,half=bottom,shape=straight]/up"
+    key = "quads/minecraft:unsorted[facing=east,half=bottom,shape=straight]"
     assert key in data.files
 
 
@@ -243,9 +266,11 @@ def test_tintindex_applies_constant(tmp_path):
         "assets/minecraft/textures/block/grass.png": _solid_png((255, 255, 255, 255)),
     }
     data = _load_npz(_extract(tmp_path, entries))
-    assert _ref(data, "minecraft:grass_block", "", "up") == "block/grass@145,189,89"
+    quads = data["quads/minecraft:grass_block[]"]
+    by_tier = {int(q["shade"]): str(q["texkey"]) for q in quads}
+    assert by_tier[TIER_UP] == "block/grass@145,189,89"
     assert (_tex(data, "block/grass@145,189,89") == (145, 189, 89, 255)).all()
-    assert _ref(data, "minecraft:grass_block", "", "south") == "block/grass"
+    assert by_tier[TIER_SOUTH] == "block/grass"
     assert (_tex(data, "block/grass") == (255, 255, 255, 255)).all()
 
 
@@ -259,8 +284,12 @@ def test_redstone_power_tint_interpolates(tmp_path):
         "assets/minecraft/textures/block/dust.png": _solid_png((255, 255, 255, 255)),
     }
     data = _load_npz(_extract(tmp_path, entries))
-    low = _tex(data, _ref(data, "minecraft:redstone_wire", "power=0", "up"))
-    high = _tex(data, _ref(data, "minecraft:redstone_wire", "power=15", "up"))
+    low = _tex(
+        data, _quad_ref(data, "minecraft:redstone_wire", "power=0", TIER_UP)
+    )
+    high = _tex(
+        data, _quad_ref(data, "minecraft:redstone_wire", "power=15", TIER_UP)
+    )
     assert (low[0, 0] == (76, 0, 0, 255)).all()
     assert (high[0, 0] == (255, 26, 26, 255)).all()
 
@@ -287,7 +316,7 @@ def test_tint_matching_rules(tmp_path, block, color):
         ),
     }
     data = _load_npz(_extract(tmp_path, entries))
-    tex = _tex(data, _ref(data, f"minecraft:{block}", "", "up"))
+    tex = _tex(data, _quad_ref(data, f"minecraft:{block}", "", TIER_UP))
     assert (tex[0, 0] == (*color, 255)).all()
 
 
@@ -310,7 +339,7 @@ def test_oversize_texture_downsampled_to_16(tmp_path):
     assert (tex[15, 15][:3] == (0, 255, 0)).all()
 
 
-def test_no_face_model_skipped_and_counted(tmp_path):
+def test_partial_face_model_emits_its_quads(tmp_path):
     entries = _stone_entries()
     entries["assets/minecraft/blockstates/torch.json"] = _blockstates("block/torch")
     entries["assets/minecraft/models/block/torch.json"] = _model(
@@ -318,9 +347,13 @@ def test_no_face_model_skipped_and_counted(tmp_path):
     )
     dest = tmp_path / "out.npz"
     summary = _extract_pack(_make_pack(tmp_path / "pack.zip", entries), dest)
-    assert summary.blocks == 1
-    assert summary.skipped == 1
-    assert not any(f.startswith("map/minecraft:torch") for f in _load_npz(dest).files)
+    assert summary.blocks == 2
+    assert summary.skipped == 0
+    data = _load_npz(dest)
+    quads = data["quads/minecraft:torch[]"]
+    assert len(quads) == 1
+    assert int(quads[0]["shade"]) == TIER_UP
+    assert int(data["occl/minecraft:torch[]"].item()) == 0
 
 
 def test_malformed_model_skips_block(tmp_path):
@@ -332,8 +365,8 @@ def test_malformed_model_skips_block(tmp_path):
     assert summary.blocks == 1
     assert summary.skipped == 1
     data = _load_npz(dest)
-    assert "map/minecraft:stone[]/up" in data.files
-    assert not any(f.startswith("map/minecraft:bad") for f in data.files)
+    assert "quads/minecraft:stone[]" in data.files
+    assert not [k for k in data.files if k.startswith("quads/minecraft:bad[")]
 
 
 def test_broken_png_skips_block(tmp_path):
@@ -356,7 +389,7 @@ def test_hash_ref_chain_follows_to_path(tmp_path):
         "assets/minecraft/textures/block/deep.png": _solid_png((11, 22, 33, 255)),
     }
     data = _load_npz(_extract(tmp_path, entries))
-    assert _ref(data, "minecraft:chained", "", "up") == "block/deep"
+    assert _quad_ref(data, "minecraft:chained", "", TIER_UP) == "block/deep"
     assert (_tex(data, "block/deep") == (11, 22, 33, 255)).all()
 
 
@@ -371,7 +404,7 @@ def test_ref_with_namespace_prefix_resolves(tmp_path):
         "assets/minecraft/textures/block/prefixed.png": _solid_png((44, 55, 66, 255)),
     }
     data = _load_npz(_extract(tmp_path, entries))
-    assert _ref(data, "minecraft:namespaced", "", "up") == "block/prefixed"
+    assert _quad_ref(data, "minecraft:namespaced", "", TIER_UP) == "block/prefixed"
     assert (_tex(data, "block/prefixed") == (44, 55, 66, 255)).all()
 
 
@@ -408,13 +441,16 @@ def test_rejects_missing_source(tmp_path):
         _extract_pack(tmp_path / "nope.zip", tmp_path / "out.npz")
 
 
-def test_deterministic_output_bytes(tmp_path):
+def test_npz_bytes_deterministic(tmp_path):
     pack = _make_pack(tmp_path / "pack.zip", _stone_entries())
     first = tmp_path / "a.npz"
     second = tmp_path / "b.npz"
     _extract_pack(pack, first)
     _extract_pack(pack, second)
     assert first.read_bytes() == second.read_bytes()
+    with np.load(first, allow_pickle=False) as data:
+        quads = data["quads/minecraft:stone[]"]
+    assert np.array_equal(quads, sort_quads(quads))
 
 
 def test_missing_pillow_raises_render_error(tmp_path, monkeypatch):
@@ -446,10 +482,10 @@ def test_cross_namespace_bare_refs_do_not_collide(tmp_path):
     assert (alpha_tex == (10, 10, 10, 255)).all()
     assert (beta_tex == (20, 20, 20, 255)).all()
     assert (
-        _tex(data, _ref(data, "alpha:shared", "", "up")) == (10, 10, 10, 255)
+        _tex(data, _quad_ref(data, "alpha:shared", "", TIER_UP)) == (10, 10, 10, 255)
     ).all()
     assert (
-        _tex(data, _ref(data, "beta:shared", "", "up")) == (20, 20, 20, 255)
+        _tex(data, _quad_ref(data, "beta:shared", "", TIER_UP)) == (20, 20, 20, 255)
     ).all()
 
 
@@ -481,20 +517,20 @@ def _texture_only_entries():
 
 def test_texture_only_pack_falls_back_to_block_textures(tmp_path):
     data = _load_npz(_extract(tmp_path, _texture_only_entries()))
-    for face in ("up", "down", "north", "south", "west", "east"):
-        assert _ref(data, "minecraft:stone", "", face) == "block/stone"
-    assert (
-        _tex(data, "block/stone") == (200, 30, 30, 255)
-    ).all()
-    assert "map/modmenu:mods_button[]/up" not in data.files
-    assert "map/minecraft:deep[]/up" not in data.files
-    assert "map/minecraft:stick[]/up" not in data.files
-    assert "map/minecraft:UPPER[]/up" not in data.files
+    quads = data["quads/minecraft:stone[]"]
+    assert len(quads) == 6
+    assert set(quads["texkey"].tolist()) == {"block/stone"}
+    assert (_tex(data, "block/stone") == (200, 30, 30, 255)).all()
+    assert not [k for k in data.files if k.startswith("quads/modmenu:")]
+    assert not [k for k in data.files if k.startswith("quads/minecraft:deep[")]
+    assert not [k for k in data.files if k.startswith("quads/minecraft:stick[")]
+    assert not [k for k in data.files if k.startswith("quads/minecraft:UPPER[")]
 
 
 def test_texture_fallback_tints_by_block_name(tmp_path):
     data = _load_npz(_extract(tmp_path, _texture_only_entries()))
-    key = _ref(data, "minecraft:grass_block", "", "up")
+    quads = data["quads/minecraft:grass_block[]"]
+    key = str(quads["texkey"][0])
     assert key == "block/grass_block@145,189,89"
     assert (_tex(data, key) == (145, 189, 89, 255)).all()
 
@@ -512,7 +548,7 @@ def test_fallback_skips_blockstate_covered_blocks(tmp_path):
         _make_pack(tmp_path / "pack.zip", entries), dest
     )
     data = _load_npz(dest)
-    assert "map/minecraft:dirt[]/up" in data.files
+    assert "quads/minecraft:dirt[]" in data.files
     assert summary.blocks == 2
     assert summary.skipped == 0
 
@@ -524,7 +560,8 @@ def test_foreign_namespace_texture_fallback(tmp_path):
         )
     }
     data = _load_npz(_extract(tmp_path, entries))
-    assert _ref(data, "create:limestone", "", "up") == "create:block/limestone"
+    quads = data["quads/create:limestone[]"]
+    assert set(quads["texkey"].tolist()) == {"create:block/limestone"}
 
 
 def test_pack_without_blockstates_or_block_textures_rejected(tmp_path):
@@ -545,16 +582,6 @@ def _stub_water_entries():
     }
 
 
-def test_stub_model_falls_back_to_particle_texture(tmp_path):
-    data = _load_npz(_extract(tmp_path, _stub_water_entries()))
-    for face in ("up", "east", "south"):
-        key = _ref(data, "minecraft:water", "", face)
-        assert key == "block/water_still@63,118,228"
-    assert (
-        _tex(data, "block/water_still@63,118,228") == (63, 118, 228, 255)
-    ).all()
-
-
 def test_stub_model_without_texture_stays_unresolved(tmp_path):
     entries = {
         "assets/minecraft/blockstates/portal.json": _blockstates("block/portal"),
@@ -566,7 +593,7 @@ def test_stub_model_without_texture_stays_unresolved(tmp_path):
     summary = _extract_pack(_make_pack(tmp_path / "pack.zip", entries), dest)
     data = _load_npz(dest)
     assert summary.skipped == 1
-    assert not [k for k in data.files if k.startswith("map/minecraft:portal[")]
+    assert not [k for k in data.files if k.startswith("quads/minecraft:portal[")]
 
 
 def test_stub_parent_chain_supplies_texture(tmp_path):
@@ -583,7 +610,7 @@ def test_stub_parent_chain_supplies_texture(tmp_path):
         ),
     }
     data = _load_npz(_extract(tmp_path, entries))
-    assert _ref(data, "minecraft:flow", "", "up") == "block/still"
+    assert _quad_ref(data, "minecraft:flow", "", TIER_UP) == "block/still"
 
 
 def test_builtin_parent_stays_unresolved(tmp_path):
@@ -600,7 +627,7 @@ def test_builtin_parent_stays_unresolved(tmp_path):
     summary = _extract_pack(_make_pack(tmp_path / "pack.zip", entries), dest)
     data = _load_npz(dest)
     assert summary.skipped == 1
-    assert not [k for k in data.files if k.startswith("map/minecraft:chest[")]
+    assert not [k for k in data.files if k.startswith("quads/minecraft:chest[")]
 
 
 # Elements-to-quads compiler (plan Task 2).
@@ -755,6 +782,25 @@ def test_explicit_uv_used_and_invalid_faces_skipped():
     assert np.allclose(quads[0]["uv"], [(4, 8), (12, 8), (12, 16), (4, 16)])
 
 
+def test_nan_uv_face_skipped():
+    faces = {
+        "south": {"texture": "block/a", "uv": [float("nan"), 0, 16, 16]},
+        "north": {"texture": "block/a"},
+    }
+    quads = _compile_elements(
+        [_box_element(faces)],
+        {},
+        "minecraft",
+        0,
+        0,
+        _texkey_stub({"block/a": "key_a"}),
+    )
+    assert quads is not None
+    assert len(quads) == 1
+    assert int(quads[0]["shade"]) == TIER_NORTH
+    assert np.isfinite(quads["uv"]).all()
+
+
 def test_huge_int_element_skipped():
     faces = {name: {"texture": "#all"} for name in _FACES}
     huge = 10**400
@@ -791,3 +837,153 @@ def test_x_rot_remaps_north_to_down():
 def test_face_geom_matches_unit_cube_quads():
     table = np.stack([_FACE_GEOM[tier] for tier in range(6)])
     assert np.array_equal(table, unit_cube_quads("k")["vtx"])
+
+
+# npz v3 quads contract (plan Task 3).
+
+
+def test_npz_v3_roundtrip(tmp_path):
+    data = _load_npz(_extract(tmp_path, _stone_entries()))
+    assert data["meta/version"].item() == "pack-quads"
+    assert "quads/minecraft:stone[]" in data.files
+    assert "occl/minecraft:stone[]" in data.files
+    quads = data["quads/minecraft:stone[]"]
+    assert quads.dtype == QUAD_DTYPE
+    assert len(quads) == 6
+    assert sorted(int(t) for t in quads["shade"]) == [0, 1, 2, 3, 4, 5]
+    assert quads["texkey"].tolist() == ["block/stone"] * 6
+    assert np.array_equal(quads, sort_quads(quads))
+    occl = data["occl/minecraft:stone[]"]
+    assert occl.dtype == np.uint8
+    assert int(occl.item()) == 1
+
+
+def test_occl_requires_unit_cube_and_opaque(tmp_path):
+    entries = _stone_entries(
+        **{
+            "assets/minecraft/blockstates/glass.json": _blockstates("block/glass"),
+            "assets/minecraft/models/block/glass.json": _model(
+                _all_faces("block/glass")
+            ),
+            "assets/minecraft/textures/block/glass.png": _solid_png(
+                (160, 208, 224, 128)
+            ),
+            "assets/minecraft/blockstates/slab.json": _blockstates("block/slab"),
+            "assets/minecraft/models/block/slab.json": _model(
+                _all_faces("block/slab"), to=(16, 8, 16)
+            ),
+            "assets/minecraft/textures/block/slab.png": _solid_png(
+                (110, 84, 52, 255)
+            ),
+            "assets/minecraft/blockstates/double.json": _blockstates("block/double"),
+            "assets/minecraft/models/block/double.json": _two_box_model(
+                _all_faces("block/stone")
+            ),
+        }
+    )
+    data = _load_npz(_extract(tmp_path, entries))
+    assert int(data["occl/minecraft:stone[]"].item()) == 1
+    assert int(data["occl/minecraft:glass[]"].item()) == 0
+    assert int(data["occl/minecraft:slab[]"].item()) == 0
+    assert int(data["occl/minecraft:double[]"].item()) == 0
+
+
+@pytest.mark.parametrize(
+    "rot",
+    [{"y": 90}, {"x": 90}, {"x": 180}, {"x": -90}, {"x": 90, "y": 90}],
+)
+def test_rotated_unit_cube_still_occludes(tmp_path, rot):
+    entries = _stone_entries(
+        **{
+            "assets/minecraft/blockstates/rot.json": _blockstates(
+                "block/rot", **rot
+            ),
+            "assets/minecraft/models/block/rot.json": _model(
+                _all_faces("block/stone")
+            ),
+        }
+    )
+    data = _load_npz(_extract(tmp_path, entries))
+    quads = data["quads/minecraft:rot[]"]
+    assert len(quads) == 6
+    assert int(data["occl/minecraft:rot[]"].item()) == 1
+
+
+def test_stub_model_emits_cube_quads(tmp_path):
+    data = _load_npz(_extract(tmp_path, _stub_water_entries()))
+    quads = data["quads/minecraft:water[]"]
+    assert quads.dtype == QUAD_DTYPE
+    assert len(quads) == 6
+    assert sorted(int(t) for t in quads["shade"]) == [0, 1, 2, 3, 4, 5]
+    assert set(quads["texkey"].tolist()) == {"block/water_still@63,118,228"}
+    assert (_tex(data, "block/water_still@63,118,228") == (63, 118, 228, 255)).all()
+
+
+def test_texture_fallback_emits_cube_quads(tmp_path):
+    data = _load_npz(_extract(tmp_path, _texture_only_entries()))
+    quads = data["quads/minecraft:stone[]"]
+    assert quads.dtype == QUAD_DTYPE
+    assert len(quads) == 6
+    assert set(quads["texkey"].tolist()) == {"block/stone"}
+    assert np.array_equal(quads["vtx"], sort_quads(unit_cube_quads("x"))["vtx"])
+    assert int(data["occl/minecraft:stone[]"].item()) == 1
+
+
+def test_quad_fuse_skips_state(tmp_path):
+    model = json.dumps(
+        {
+            "elements": [
+                {
+                    "from": [0, 0, 0],
+                    "to": [16, 16, 16],
+                    "faces": _all_faces("block/stone"),
+                }
+                for _ in range(44)
+            ]
+        }
+    )
+    entries = _stone_entries(
+        **{
+            "assets/minecraft/blockstates/big.json": _blockstates("block/big"),
+            "assets/minecraft/models/block/big.json": model,
+        }
+    )
+    dest = tmp_path / "out.npz"
+    summary = _extract_pack(_make_pack(tmp_path / "pack.zip", entries), dest)
+    assert summary.blocks == 1
+    assert summary.skipped == 1
+    data = _load_npz(dest)
+    assert "quads/minecraft:stone[]" in data.files
+    assert not [k for k in data.files if k.startswith("quads/minecraft:big[")]
+    assert not [k for k in data.files if k.startswith("occl/minecraft:big[")]
+
+
+def test_quad_fuse_boundary_256_kept(tmp_path):
+    elements = [
+        {"from": [0, 0, 0], "to": [16, 16, 16], "faces": _all_faces("block/stone")}
+        for _ in range(42)
+    ]
+    elements.append(
+        {
+            "from": [0, 0, 0],
+            "to": [16, 16, 16],
+            "faces": {
+                name: {"texture": "block/stone"}
+                for name in ("down", "up", "north", "south")
+            },
+        }
+    )
+    entries = _stone_entries(
+        **{
+            "assets/minecraft/blockstates/edge.json": _blockstates("block/edge"),
+            "assets/minecraft/models/block/edge.json": json.dumps(
+                {"elements": elements}
+            ),
+        }
+    )
+    dest = tmp_path / "out.npz"
+    summary = _extract_pack(_make_pack(tmp_path / "pack.zip", entries), dest)
+    assert summary.blocks == 2
+    assert summary.skipped == 0
+    data = _load_npz(dest)
+    assert len(data["quads/minecraft:edge[]"]) == 256

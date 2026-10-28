@@ -1,4 +1,4 @@
-"""Resource pack extraction: blockstates → models → textures → npz."""
+"""Resource pack extraction: blockstates → models → quads → npz."""
 
 import io
 import json
@@ -19,12 +19,17 @@ from litematic.render.quads import (
     TIER_UP,
     TIER_WEST,
     is_parallelogram,
+    sort_quads,
+    unit_cube_quads,
 )
 
 __all__ = ["ExtractSummary"]
 
 _TEX_SIZE = 16
 _FIXED_DATE = (1980, 1, 1, 0, 0, 0)
+_NPZ_VERSION = "pack-quads"
+_QUAD_FUSE = 256
+_OPAQUE_ALPHA = 250.0
 _TINTS: dict[str, tuple[int, int, int]] = {
     "grass": (145, 189, 89),
     "foliage": (119, 171, 47),
@@ -41,8 +46,6 @@ _VEC = {
     "east": (1, 0, 0),
 }
 _NAME = {v: k for k, v in _VEC.items()}
-_WORLD_FACES = ("up", "east", "south")
-_ALL_FACES = tuple(_VEC)
 _FACE_TIER = {
     "down": TIER_DOWN,
     "up": TIER_UP,
@@ -107,13 +110,14 @@ def _extract_pack(
         texture_cache: dict[str, np.ndarray | None] = {}
         model_cache: dict[str, dict[str, Any] | None] = {}
         tex_arrays: dict[str, np.ndarray] = {}
-        maps: dict[str, str] = {}
+        quad_map: dict[str, np.ndarray] = {}
+        occl_map: dict[str, bool] = {}
         blocks = 0
         skipped = 0
         covered: set[str] = set()
         for state_name in state_files:
             try:
-                state_maps = _extract_block(
+                states = _extract_block(
                     archive, names, state_name, model_cache, texture_cache, tex_arrays
                 )
             except RenderError:
@@ -121,36 +125,30 @@ def _extract_pack(
             except Exception:
                 skipped += 1
                 continue
-            if not state_maps:
+            if not states:
                 skipped += 1
                 continue
             block_id = _block_id(state_name)
             covered.add(block_id)
-            for state_key, faces in state_maps.items():
-                for face, array_key in faces.items():
-                    maps[f"map/{block_id}[{state_key}]/{face}"] = array_key
+            for state_key, (quads, occl) in states.items():
+                key = f"{block_id}[{state_key}]"
+                quad_map[key] = quads
+                occl_map[key] = occl
             blocks += 1
         for ns, stem in _fallback_blocks(names):
             block_id = f"{ns}:{stem}"
             if block_id in covered:
                 continue
-            tex_ref = f"block/{stem}"
-            tex_key = _texture_key(tex_ref, ns)
-            raw = _load_texture(archive, names, ns, tex_ref, tex_key, texture_cache)
-            if raw is None:
+            array_key = _fallback_array_key(
+                archive, names, ns, stem, texture_cache, tex_arrays
+            )
+            if array_key is None:
                 continue
-            tint = _tint_for(block_id, "")
-            if tint is None:
-                tex_arrays.setdefault(tex_key, raw)
-                array_key = tex_key
-            else:
-                array_key = f"{tex_key}@{tint[0]},{tint[1]},{tint[2]}"
-                if array_key not in tex_arrays:
-                    tex_arrays[array_key] = _apply_tint(raw, tint)
-            for face in _ALL_FACES:
-                maps[f"map/{block_id}[]/{face}"] = array_key
+            cube = unit_cube_quads(array_key)
+            quad_map[f"{block_id}[]"] = cube
+            occl_map[f"{block_id}[]"] = _unit_cube_occl(cube, tex_arrays)
             blocks += 1
-    _write_npz(Path(dest), tex_arrays, maps, pack_mtime)
+    _write_npz(Path(dest), tex_arrays, quad_map, occl_map, pack_mtime)
     return ExtractSummary(Path(dest), blocks, skipped)
 
 
@@ -170,64 +168,132 @@ def _extract_block(
     model_cache: dict[str, dict[str, Any] | None],
     texture_cache: dict[str, np.ndarray | None],
     tex_arrays: dict[str, np.ndarray],
-) -> dict[str, dict[str, str]]:
-    """Extract every variant of one blockstate file, keyed by state."""
+) -> dict[str, tuple[np.ndarray, bool]]:
+    """Extract compiled quads and occl flags for every variant of a state."""
     state = json.loads(archive.read(state_name))
     variants = _all_variants(state)
     if not variants:
         return {}
     ns = state_name.split("/")[1]
     block_id = _block_id(state_name)
-    result: dict[str, dict[str, str]] = {}
+    result: dict[str, tuple[np.ndarray, bool]] = {}
     for state_key, variant in variants:
         x_rot = int(variant.get("x", 0))
         y_rot = int(variant.get("y", 0))
         model = _cached_model(archive, names, ns, variant["model"], model_cache)
         if model is None:
             continue
-        faces: dict[str, str] = {}
-        for world_face in _ALL_FACES:
-            model_face = _source_face(world_face, x_rot, y_rot)
-            array_key = _face_array_key(
-                archive,
-                names,
-                ns,
-                model,
-                model_face,
-                block_id,
-                state_key,
-                texture_cache,
-                tex_arrays,
-            )
-            if array_key is not None:
-                faces[world_face] = array_key
-        if all(required in faces for required in _WORLD_FACES):
-            result[state_key] = faces
+        quads = _variant_quads(
+            archive,
+            names,
+            ns,
+            model,
+            block_id,
+            state_key,
+            x_rot,
+            y_rot,
+            texture_cache,
+            tex_arrays,
+        )
+        if quads is None or len(quads) > _QUAD_FUSE:
+            continue
+        result[state_key] = (quads, _unit_cube_occl(quads, tex_arrays))
     return result
 
 
-def _face_array_key(
+def _variant_quads(
     archive: zipfile.ZipFile,
     names: set[str],
     ns: str,
     model: dict[str, Any],
-    model_face: str,
+    block_id: str,
+    state_key: str,
+    x_rot: int,
+    y_rot: int,
+    texture_cache: dict[str, np.ndarray | None],
+    tex_arrays: dict[str, np.ndarray],
+) -> np.ndarray | None:
+    """Compile one variant's quads: element boxes, else a stub unit cube."""
+    if model["elements"] is None:
+        return _stub_quads(
+            archive, names, ns, model, block_id, state_key, texture_cache, tex_arrays
+        )
+
+    def texkey_for(
+        face: dict[str, Any], textures: dict[str, str], face_ns: str
+    ) -> str | None:
+        return _element_texkey(
+            archive,
+            names,
+            face_ns,
+            face,
+            textures,
+            block_id,
+            state_key,
+            texture_cache,
+            tex_arrays,
+        )
+
+    return _compile_elements(
+        model["elements"], model["textures"], ns, x_rot, y_rot, texkey_for
+    )
+
+
+def _element_texkey(
+    archive: zipfile.ZipFile,
+    names: set[str],
+    ns: str,
+    face: dict[str, Any],
+    textures: dict[str, str],
     block_id: str,
     state_key: str,
     texture_cache: dict[str, np.ndarray | None],
     tex_arrays: dict[str, np.ndarray],
 ) -> str | None:
-    face = model["faces"].get(model_face)
-    if not isinstance(face, dict):
-        return None
-    tex_ref = _resolve_ref(face.get("texture"), model["textures"])
+    """Resolve one element face's texture ref into a tex array key."""
+    tex_ref = _resolve_ref(face.get("texture"), textures)
     if tex_ref is None:
         return None
+    return _ref_array_key(
+        archive,
+        names,
+        ns,
+        tex_ref,
+        "tintindex" in face,
+        block_id,
+        state_key,
+        texture_cache,
+        tex_arrays,
+    )
+
+
+def _ref_array_key(
+    archive: zipfile.ZipFile,
+    names: set[str],
+    ns: str,
+    tex_ref: str,
+    tinted: bool,
+    block_id: str,
+    state_key: str,
+    texture_cache: dict[str, np.ndarray | None],
+    tex_arrays: dict[str, np.ndarray],
+) -> str | None:
+    """Load a texture ref and register its raw or tinted array key."""
     tex_key = _texture_key(tex_ref, ns)
     raw = _load_texture(archive, names, ns, tex_ref, tex_key, texture_cache)
     if raw is None:
         return None
-    tint = _tint_for(block_id, state_key) if "tintindex" in face else None
+    tint = _tint_for(block_id, state_key) if tinted else None
+    return _register_array(raw, tex_key, tint, tex_arrays)
+
+
+def _register_array(
+    raw: np.ndarray,
+    tex_key: str,
+    tint: tuple[int, int, int] | None,
+    tex_arrays: dict[str, np.ndarray],
+) -> str:
+    """Store a raw texture under tex_key, adding a tinted variant if asked."""
     if tint is None:
         tex_arrays.setdefault(tex_key, raw)
         return tex_key
@@ -235,6 +301,94 @@ def _face_array_key(
     if array_key not in tex_arrays:
         tex_arrays[array_key] = _apply_tint(raw, tint)
     return array_key
+
+
+def _stub_quads(
+    archive: zipfile.ZipFile,
+    names: set[str],
+    ns: str,
+    model: dict[str, Any],
+    block_id: str,
+    state_key: str,
+    texture_cache: dict[str, np.ndarray | None],
+    tex_arrays: dict[str, np.ndarray],
+) -> np.ndarray | None:
+    """Build unit-cube quads from an element-less model's first texture."""
+    array_key = _ref_array_key(
+        archive,
+        names,
+        ns,
+        model["stub_ref"],
+        True,
+        block_id,
+        state_key,
+        texture_cache,
+        tex_arrays,
+    )
+    if array_key is None:
+        return None
+    return unit_cube_quads(array_key)
+
+
+def _fallback_array_key(
+    archive: zipfile.ZipFile,
+    names: set[str],
+    ns: str,
+    stem: str,
+    texture_cache: dict[str, np.ndarray | None],
+    tex_arrays: dict[str, np.ndarray],
+) -> str | None:
+    """Resolve a textures/block/<stem>.png fallback into an array key."""
+    tex_ref = f"block/{stem}"
+    tex_key = _texture_key(tex_ref, ns)
+    raw = _load_texture(archive, names, ns, tex_ref, tex_key, texture_cache)
+    if raw is None:
+        return None
+    tint = _tint_for(f"{ns}:{stem}", "")
+    return _register_array(raw, tex_key, tint, tex_arrays)
+
+
+def _corner_tuple(point: Any) -> tuple[float, float, float]:
+    """Convert one vertex row to a plain three-float tuple."""
+    x, y, z = (float(value) for value in point)
+    return (x, y, z)
+
+
+# Unit-cube corners per tier as sorted order-independent lists: blockstate
+# rotations map a face onto its own square with reversed winding, so an
+# element-wise comparison would wrongly reject rotated opaque cubes.
+_UNIT_CORNERS: dict[int, list[tuple[float, float, float]]] = {
+    tier: sorted(_corner_tuple(corner) for corner in corners)
+    for tier, corners in _FACE_GEOM.items()
+}
+
+
+def _sorted_corners(quad: Any) -> list[tuple[float, float, float]]:
+    """Return a quad's corners as a sorted, order-independent list."""
+    return sorted(_corner_tuple(point) for point in quad["vtx"])
+
+
+def _unit_cube_occl(
+    quads: np.ndarray, tex_arrays: dict[str, np.ndarray]
+) -> bool:
+    """Judge the v1 opaque-cube rule: exact unit cube, visible faces opaque."""
+    if len(quads) != 6:
+        return False
+    by_tier: dict[int, Any] = {}
+    for quad in quads:
+        by_tier[int(quad["shade"])] = quad
+    if set(by_tier) != set(_FACE_GEOM):
+        return False
+    for tier in _FACE_GEOM:
+        if _sorted_corners(by_tier[tier]) != _UNIT_CORNERS[tier]:
+            return False
+    alphas: list[float] = []
+    for tier in (TIER_UP, TIER_SOUTH, TIER_EAST):
+        array = tex_arrays.get(str(by_tier[tier]["texkey"]))
+        if array is None:
+            return False
+        alphas.append(float(array[..., 3].mean()))
+    return float(np.mean(alphas)) >= _OPAQUE_ALPHA
 
 
 def _compile_elements(
@@ -323,6 +477,8 @@ def _face_uvs(
     try:
         u1, v1, u2, v2 = (float(value) for value in rect)
     except (TypeError, ValueError, OverflowError):
+        return None
+    if not all(math.isfinite(value) for value in (u1, v1, u2, v2)):
         return None
     if min(u1, v1, u2, v2) < 0.0 or max(u1, v1, u2, v2) > 16.0:
         return None
@@ -413,34 +569,31 @@ def _cached_model(
         if model is None:
             cache[key] = None
         elif model["elements"] is None:
-            faces = _stub_faces(names, ns, model["textures"])
-            if faces is None:
-                cache[key] = None
-            else:
-                cache[key] = {
+            stub_ref = _stub_texture(names, ns, model["textures"])
+            cache[key] = (
+                None
+                if stub_ref is None
+                else {
                     "textures": model["textures"],
-                    "elements": [],
-                    "faces": faces,
+                    "elements": None,
+                    "stub_ref": stub_ref,
                 }
+            )
         else:
-            model["faces"] = _face_textures(model)
             cache[key] = model
     return cache[key]
 
 
-def _stub_faces(
+def _stub_texture(
     names: set[str], ns: str, textures: dict[str, Any]
-) -> dict[str, dict[str, Any]] | None:
-    """Synthesize six cube faces from an element-less model's textures."""
+) -> str | None:
+    """Find the first concrete texture ref an element-less model can load."""
     for value in textures.values():
         if not isinstance(value, str) or value.startswith("#"):
             continue
         path = _asset_path(ns, value, "textures", ".png")
         if path is not None and path in names:
-            return {
-                face: {"texture": value, "tintindex": 0}
-                for face in _ALL_FACES
-            }
+            return value
     return None
 
 
@@ -477,20 +630,6 @@ def _resolve_model(
     return {"textures": merged_textures, "elements": elements}
 
 
-def _face_textures(model: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    faces: dict[str, dict[str, Any]] = {}
-    for element in model["elements"]:
-        if not isinstance(element, dict):
-            continue
-        element_faces = element.get("faces")
-        if not isinstance(element_faces, dict):
-            continue
-        for face_name, face in element_faces.items():
-            if isinstance(face, dict) and face_name not in faces:
-                faces[face_name] = face
-    return faces
-
-
 def _resolve_ref(ref: Any, textures: dict[str, str]) -> str | None:
     """Resolve a face texture reference, following # chains up to depth 32."""
     if not isinstance(ref, str) or not ref:
@@ -513,13 +652,6 @@ def _rotate(face: str, x: int, y: int) -> str:
     for _ in range((y // 90) % 4):  # x' = -z, z' = x
         vec = (-vec[2], vec[1], vec[0])
     return _NAME[vec]
-
-
-def _source_face(world_face: str, x: int, y: int) -> str:
-    for face in _ALL_FACES:
-        if _rotate(face, x, y) == world_face:
-            return face
-    raise AssertionError("unreachable")
 
 
 def _texture_key(ref: str, ns: str) -> str:
@@ -643,17 +775,20 @@ def _decode_png(data: bytes) -> Any:
 def _write_npz(
     dest: Path,
     tex_arrays: dict[str, np.ndarray],
-    maps: dict[str, str],
+    quad_map: dict[str, np.ndarray],
+    occl_map: dict[str, bool],
     pack_mtime: float,
 ) -> None:
     entries: dict[str, np.ndarray] = {
-        "meta/version": np.array("pack"),
+        "meta/version": np.array(_NPZ_VERSION),
         "meta/pack_mtime": np.array(pack_mtime),
     }
     for array_key, array in tex_arrays.items():
         entries[f"tex/{array_key}"] = array
-    for map_key, array_key in maps.items():
-        entries[map_key] = np.array(array_key)
+    for key, quads in quad_map.items():
+        entries[f"quads/{key}"] = sort_quads(quads)
+    for key, occl in occl_map.items():
+        entries[f"occl/{key}"] = np.array(occl, dtype=np.uint8)
     try:
         out = zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED)
     except OSError as exc:

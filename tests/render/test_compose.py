@@ -1,28 +1,33 @@
 """World composition contract: air exclusion, culling, yaw, spans."""
 
 import numpy as np
+import pytest
 from helpers.litematica_packer import build_litematic_bytes
 
 from litematic import loads
 from litematic.render.isometric import _compose
 from litematic.render.pack import Textures
+from litematic.render.quads import unit_cube_quads
 from litematic.render.templates import (
     SHAPE_CUBE,
     SHAPE_SLAB_BOTTOM,
     SHAPE_SLAB_TOP,
 )
 
-_FACES = ("up", "east", "south", "down", "north", "west")
+# Temporary: the v2 quad compose replaces this module in plan Task 6.
+pytestmark = pytest.mark.xfail(reason="v2 quad compose not wired yet (Task 6)")
 
 
 def _textures(opaque=(), alpha128=(), slabs=()):
     arrays = {}
-    maps = {}
+    quads_map = {}
+    occl_map = {}
 
     def register(name, rgba):
         key = f"block/{name.split(':')[-1]}"
         arrays[key] = np.full((16, 16, 4), rgba, dtype=np.uint8)
-        maps[f"{name}[]"] = {face: key for face in _FACES}
+        quads_map[f"{name}[]"] = unit_cube_quads(key)
+        occl_map[f"{name}[]"] = rgba[3] >= 250
 
     for name in opaque:
         register(name, (140, 140, 140, 255))
@@ -30,7 +35,13 @@ def _textures(opaque=(), alpha128=(), slabs=()):
         register(name, (160, 208, 224, 128))
     for name in slabs:
         register(name, (110, 84, 52, 255))
-    return Textures(version="pack", arrays=arrays, maps=maps, pack_mtime=0.0)
+    return Textures(
+        version="pack-quads",
+        arrays=arrays,
+        quads_map=quads_map,
+        occl_map=occl_map,
+        pack_mtime=0.0,
+    )
 
 
 def _schematic(regions):

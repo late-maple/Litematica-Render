@@ -12,6 +12,7 @@ from PIL import Image
 from litematic.render import pack as pack_mod
 from litematic.render.errors import RenderError
 from litematic.render.pack import Textures, load_pack
+from litematic.render.quads import TIER_EAST, TIER_SOUTH, TIER_UP, unit_cube_quads
 
 
 def _png(color):
@@ -58,11 +59,12 @@ def test_first_load_extracts_and_caches(tmp_path):
     pack_file = _mini_pack(tmp_path / "pack.zip")
     textures = load_pack(pack_file)
     assert isinstance(textures, Textures)
-    assert textures.version == "pack"
+    assert textures.version == "pack-quads"
     assert (tmp_path / "pack.litematic-tex.npz").is_file()
-    up, east, south = textures.faces("minecraft:stone", {})
-    assert (up == (200, 30, 30, 255)).all()
-    assert east is not None and south is not None
+    quads = textures.quads("minecraft:stone", {})
+    assert quads is not None
+    assert len(quads) == 6
+    assert textures.occludes("minecraft:stone", {})
 
 
 def test_second_load_reuses_cache(tmp_path):
@@ -75,7 +77,7 @@ def test_second_load_reuses_cache(tmp_path):
     finally:
         pack_mod._extract_pack = counter.real
     assert counter.calls == 0
-    assert textures.faces("minecraft:stone", {}) is not None
+    assert textures.quads("minecraft:stone", {}) is not None
 
 
 def test_pack_mtime_change_forces_reextract(tmp_path):
@@ -89,8 +91,10 @@ def test_pack_mtime_change_forces_reextract(tmp_path):
     finally:
         pack_mod._extract_pack = counter.real
     assert counter.calls == 2
-    up, _, _ = textures.faces("minecraft:stone", {})
-    assert (up == (10, 200, 10, 255)).all()
+    quads = textures.quads("minecraft:stone", {})
+    assert quads is not None
+    key = str(quads["texkey"][0])
+    assert (textures.arrays[key] == (10, 200, 10, 255)).all()
 
 
 def test_corrupt_cache_rebuilt(tmp_path):
@@ -104,7 +108,7 @@ def test_corrupt_cache_rebuilt(tmp_path):
     finally:
         pack_mod._extract_pack = counter.real
     assert counter.calls == 1
-    assert textures.faces("minecraft:stone", {}) is not None
+    assert textures.quads("minecraft:stone", {}) is not None
 
 
 def test_cache_missing_meta_version_rebuilt(tmp_path):
@@ -125,7 +129,7 @@ def test_bad_shape_entry_dropped(tmp_path):
     load_pack(pack_file)
     cache = tmp_path / "pack.litematic-tex.npz"
     data = dict(np.load(cache, allow_pickle=False))
-    data["tex/block/stone"] = np.zeros((8, 8, 4), np.uint8)
+    data["quads/minecraft:stone[]"] = np.zeros((3, 4), np.uint8)
     np.savez(cache, **data)
     counter = _Counter()
     pack_mod._extract_pack = counter
@@ -133,8 +137,20 @@ def test_bad_shape_entry_dropped(tmp_path):
         textures = load_pack(pack_file)
     finally:
         pack_mod._extract_pack = counter.real
-    assert "block/stone" not in textures.arrays
-    assert textures.faces("minecraft:stone", {}) is None
+    assert "minecraft:stone[]" not in textures.quads_map
+    assert textures.quads("minecraft:stone", {}) is None
+
+
+def test_quads_entry_with_unknown_texkey_dropped(tmp_path):
+    pack_file = _mini_pack(tmp_path / "pack.zip")
+    load_pack(pack_file)
+    cache = tmp_path / "pack.litematic-tex.npz"
+    data = dict(np.load(cache, allow_pickle=False))
+    data["quads/minecraft:ghost[]"] = unit_cube_quads("block/ghost")
+    np.savez(cache, **data)
+    textures = load_pack(pack_file)
+    assert textures.quads("minecraft:ghost", {}) is None
+    assert textures.quads("minecraft:stone", {}) is not None
 
 
 def test_state_lookup_with_fallback(tmp_path):
@@ -162,13 +178,19 @@ def test_state_lookup_with_fallback(tmp_path):
         for name, data in entries.items():
             zf.writestr(name, data)
     textures = load_pack(tmp_path / "p2.zip")
-    up, east, south = textures.faces("minecraft:thing", {"facing": "south"})
-    assert (up == (1, 2, 3, 255)).all()
-    assert (east == (4, 5, 6, 255)).all()
-    unknown = textures.faces("minecraft:thing", {"facing": "west"})
-    assert unknown is None
-    assert textures.faces("minecraft:plain", {"anything": "x"}) is not None
-    assert textures.faces("minecraft:absent", {}) is None
+    quads = textures.quads("minecraft:thing", {"facing": "south"})
+    assert quads is not None
+    by_tier = {int(q["shade"]): str(q["texkey"]) for q in quads}
+    assert by_tier[TIER_UP] == "block/up"
+    assert by_tier[TIER_EAST] == "block/east"
+    assert by_tier[TIER_SOUTH] == "block/south"
+    assert (textures.arrays["block/up"] == (1, 2, 3, 255)).all()
+    assert textures.quads("minecraft:thing", {"facing": "west"}) is None
+    assert textures.quads("minecraft:plain", {"anything": "x"}) is not None
+    assert textures.quads("minecraft:absent", {}) is None
+    assert not textures.occludes("minecraft:thing", {"facing": "south"})
+    assert not textures.occludes("minecraft:plain", {})
+    assert not textures.occludes("minecraft:absent", {})
 
 
 def test_missing_pack_raises(tmp_path):
@@ -191,7 +213,7 @@ def test_corrupt_cache_member_auto_rebuilds(tmp_path):
     finally:
         pack_mod._extract_pack = counter.real
     assert counter.calls == 1
-    assert textures.faces("minecraft:stone", {}) is not None
+    assert textures.quads("minecraft:stone", {}) is not None
 
 
 def test_unwritable_cache_falls_back_to_tempdir(tmp_path, monkeypatch):
@@ -212,7 +234,7 @@ def test_unwritable_cache_falls_back_to_tempdir(tmp_path, monkeypatch):
     assert len(calls) == 2
     assert calls[0].name == "pack.litematic-tex.npz"
     assert calls[1].parent != calls[0].parent
-    assert textures.faces("minecraft:stone", {}) is not None
+    assert textures.quads("minecraft:stone", {}) is not None
 
 
 def test_vanished_pack_raises_render_error(tmp_path, monkeypatch):
@@ -236,4 +258,32 @@ def test_two_arg_extract_produces_loadable_cache(tmp_path):
     extract_mod._extract_pack(pack_file, dest)
     parsed = pack_mod._parse_textures(dest)
     assert parsed is not None
-    assert parsed.version == "pack"
+    assert parsed.version == "pack-quads"
+
+
+def test_old_cache_version_rebuilds(tmp_path):
+    pack_file = _mini_pack(tmp_path / "pack.zip")
+    load_pack(pack_file)
+    cache = tmp_path / "pack.litematic-tex.npz"
+    data = dict(np.load(cache, allow_pickle=False))
+    data["meta/version"] = np.array("pack")  # simulate a v1 cache
+    np.savez(cache, **data)
+    counter = _Counter()
+    pack_mod._extract_pack = counter
+    try:
+        textures = load_pack(pack_file)
+    finally:
+        pack_mod._extract_pack = counter.real
+    assert counter.calls == 1
+    assert textures.version == "pack-quads"
+    assert textures.quads("minecraft:stone", {}) is not None
+
+
+def test_load_pack_missing_pillow_still_render_error(tmp_path, monkeypatch):
+    import sys
+
+    pack_file = _mini_pack(tmp_path / "pack.zip")
+    monkeypatch.setitem(sys.modules, "PIL", None)
+    with pytest.raises(RenderError, match="Pillow is required"):
+        load_pack(pack_file)
+    assert not (tmp_path / "pack.litematic-tex.npz").exists()
