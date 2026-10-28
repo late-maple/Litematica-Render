@@ -108,11 +108,8 @@ def _choose_scale(
         t = max(1, min(max_size * ss // (2 * span_w), max_size * ss // span_h))
         width = 2 * t * span_w
         height = t * span_h
-        if (
-            width <= max_size * ss
-            and height <= max_size * ss
-            and width * height <= _FUSE_PIXELS
-        ):
+        fits = width <= max_size * ss and height <= max_size * ss
+        if (fits or ss == 1) and width * height <= _FUSE_PIXELS:
             return t, ss
     raise RenderError(
         f"scale: spans {span_w}x{span_h} exceed canvas budget at "

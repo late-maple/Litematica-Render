@@ -20,6 +20,10 @@ def test_choose_scale_unsatisfiable_raises():
         _choose_scale(4000, 6000, 2048, 1)
 
 
+def test_choose_scale_floor_t_one_fits_fuse_over_max_size():
+    assert _choose_scale(1627, 2199, 512, 2) == (1, 1)
+
+
 def test_choose_scale_accepts_fuse_boundary():
     assert _choose_scale(2048, 2048, 8192, 1) == (2, 1)
 
