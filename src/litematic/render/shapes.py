@@ -1,293 +1,203 @@
-"""Builtin shape table: geometry-only quads for common block families."""
+"""Builtin shape table: box families plus multi-box and cross plants."""
 
 from collections.abc import Callable, Mapping
 
 import numpy as np
 
 from litematic.render.errors import RenderError
-from litematic.render.quads import (
-    QUAD_DTYPE,
-    TIER_DOWN,
-    TIER_NORTH,
-    TIER_SOUTH,
-    TIER_UP,
-    TIER_WEST,
+from litematic.render.quads import QUAD_DTYPE, TIER_UP
+from litematic.render.shapes_boxes import (
+    Box,
+    _banner,
+    _barrel,
+    _button,
+    _cactus,
+    _carpet,
+    _chest,
+    _combine,
+    _conduit,
+    _door,
+    _facing,
+    _flag,
+    _fluid,
+    _head,
+    _ladder,
+    _lectern,
+    _lily_pad,
+    _pressure_plate,
+    _rail,
+    _repeater,
+    _shulker_box,
+    _sign,
+    _slab,
+    _snow,
+    _stairs,
+    _text,
+    _torch_standing,
+    _torch_wall,
+    _trapdoor,
+    box_quads,
 )
 
 __all__ = ["builtin_quads", "box_quads"]
 
-Box = tuple[float, float, float, float, float, float]
 Builder = Callable[[Mapping[str, str]], np.ndarray]
-_FACINGS = ("north", "south", "east", "west")
+_SIDES = ("north", "south", "west", "east")
 
-# Face corner templates per tier (down/up/north/south/west/east) in the
-# pinned winding, mirroring quads._CUBE_VTX so a full-cube box matches the
-# quad core exactly (kept in sync by test_shapes).
-_FACE_CORNERS: tuple[tuple[tuple[int, int, int], ...], ...] = (
-    ((0, 0, 16), (16, 0, 16), (16, 0, 0), (0, 0, 0)),  # down
-    ((0, 16, 0), (16, 16, 0), (16, 16, 16), (0, 16, 16)),  # up
-    ((16, 16, 0), (0, 16, 0), (0, 0, 0), (16, 0, 0)),  # north
-    ((0, 16, 16), (16, 16, 16), (16, 0, 16), (0, 0, 16)),  # south
-    ((0, 16, 16), (0, 16, 0), (0, 0, 0), (0, 0, 16)),  # west
-    ((16, 16, 0), (16, 16, 16), (16, 0, 16), (16, 0, 0)),  # east
+# Connection geometry per family (Blockscope shape.rs taxonomy): fences
+# carry two rails per connected side at y 6..9 and 12..15, walls one full
+# arm with the post height driven by "up" (low and tall arms share the
+# same 0..14 box, so tall arms' cross-block reach is approximated), panes
+# and iron bars one full arm per side plus a full bar when unconnected.
+_FENCE_POST: Box = (6, 0, 6, 10, 16, 10)
+_FENCE_ARMS: dict[str, tuple[Box, Box]] = {
+    "north": ((6, 6, 0, 10, 9, 6), (6, 12, 0, 10, 15, 6)),
+    "south": ((6, 6, 10, 10, 9, 16), (6, 12, 10, 10, 15, 16)),
+    "west": ((0, 6, 6, 6, 9, 10), (0, 12, 6, 6, 15, 10)),
+    "east": ((10, 6, 6, 16, 9, 10), (10, 12, 6, 16, 15, 10)),
+}
+_GATE_POST: Box = (6, 0, 6, 10, 16, 10)
+# Open gate bars stay centered over the full block depth per Blockscope,
+# coplanarly overlapping the post side faces; both faces share the same
+# auto-UV texel mapping, so the overlap does not change rendered pixels.
+_GATE_BAR_X: Box = (0, 6, 6, 16, 15, 10)
+_GATE_BAR_Z: Box = (6, 6, 0, 10, 15, 16)
+_WALL_ARMS: dict[str, Box] = {
+    "north": (4, 0, 0, 12, 14, 4),
+    "south": (4, 0, 12, 12, 14, 16),
+    "west": (0, 0, 4, 4, 14, 12),
+    "east": (12, 0, 4, 16, 14, 12),
+}
+_PANE_POST: Box = (7, 0, 7, 9, 16, 9)
+_PANE_ARMS: dict[str, Box] = {
+    "north": (7, 0, 0, 9, 16, 7),
+    "south": (7, 0, 9, 9, 16, 16),
+    "west": (0, 0, 7, 7, 16, 9),
+    "east": (9, 0, 7, 16, 16, 9),
+}
+_PANE_BAR: Box = (7, 0, 0, 9, 16, 16)
+
+# Cross plants: two diagonal planes spanning the full block height,
+# texture v running bottom (v=16) to top (v=0); both quads are double-
+# sided and carry the up tier like the vanilla cross model.
+_CROSS_VTX = np.array(
+    [
+        [(0, 0, 0), (16, 0, 16), (16, 16, 16), (0, 16, 0)],
+        [(16, 0, 0), (0, 0, 16), (0, 16, 16), (16, 16, 0)],
+    ],
+    dtype="f4",
+)
+_CROSS_UV = np.tile(
+    np.array([(0, 16), (16, 16), (16, 0), (0, 0)], dtype="f4"), (2, 1, 1)
 )
 
-# Panels keyed by facing: open trapdoors rest on the facing edge, closed
-# doors stand in the facing plane, open doors swing to the side, ladders
-# and wall torches hug the facing wall (Blockscope shape.rs taxonomy).
-_OPEN_TRAPDOOR: dict[str, Box] = {
-    "north": (0, 0, 0, 16, 16, 3),
-    "south": (0, 0, 13, 16, 16, 16),
-    "west": (0, 0, 0, 3, 16, 16),
-    "east": (13, 0, 0, 16, 16, 16),
-}
-_DOOR_CLOSED: dict[str, Box] = {
-    "north": (0, 0, 0, 16, 16, 3),
-    "south": (0, 0, 13, 16, 16, 16),
-    "west": (0, 0, 0, 3, 16, 16),
-    "east": (13, 0, 0, 16, 16, 16),
-}
-_DOOR_OPEN: dict[str, Box] = {
-    "north": (0, 0, 0, 3, 16, 16),
-    "south": (13, 0, 0, 16, 16, 16),
-    "west": (0, 0, 13, 16, 16, 16),
-    "east": (0, 0, 0, 16, 16, 3),
-}
-_LADDER: dict[str, Box] = {
-    "north": (0, 0, 0, 16, 16, 2),
-    "south": (0, 0, 14, 16, 16, 16),
-    "west": (0, 0, 0, 2, 16, 16),
-    "east": (14, 0, 0, 16, 16, 16),
-}
-_BUTTON_WALL: dict[str, Box] = {
-    "north": (5, 5, 0, 11, 11, 2),
-    "south": (5, 5, 14, 11, 11, 16),
-    "west": (0, 5, 5, 2, 11, 11),
-    "east": (14, 5, 5, 16, 11, 11),
-}
-_TORCH_WALL: dict[str, Box] = {
-    "north": (7, 3, 0, 9, 13, 2),
-    "south": (7, 3, 14, 9, 13, 16),
-    "west": (0, 3, 7, 2, 13, 9),
-    "east": (14, 3, 7, 16, 13, 9),
-}
-# Stair step footprint (x0, x1, z0, z1) per facing; north is the default.
-_STAIR_STEP: dict[str, tuple[int, int, int, int]] = {
-    "north": (0, 16, 0, 8),
-    "south": (0, 16, 8, 16),
-    "west": (0, 8, 0, 16),
-    "east": (8, 16, 0, 16),
-}
+# Cross-plant block names rendered as two diagonal planes (Blockscope
+# taxonomy plus the sapling/propagule suffix families).
+_CROSS_PLANTS = frozenset(
+    {
+        "short_grass",
+        "tall_grass",
+        "fern",
+        "large_fern",
+        "dandelion",
+        "poppy",
+        "blue_orchid",
+        "allium",
+        "azure_bluet",
+        "oxeye_daisy",
+        "cornflower",
+        "lily_of_the_valley",
+        "red_tulip",
+        "orange_tulip",
+        "white_tulip",
+        "pink_tulip",
+        "sunflower",
+        "lilac",
+        "rose_bush",
+        "peony",
+        "vine",
+        "cobweb",
+        "bamboo",
+        "dead_bush",
+        "seagrass",
+        "kelp",
+        "kelp_plant",
+        "sugar_cane",
+        "wheat",
+        "carrots",
+        "potatoes",
+        "beetroots",
+        "torchflower",
+        "pitcher_plant",
+        "bush",
+        "sweet_berry_bush",
+        "tall_seagrass",
+        "red_mushroom",
+        "brown_mushroom",
+        "crimson_roots",
+        "warped_roots",
+        "nether_sprouts",
+        "crimson_fungus",
+        "warped_fungus",
+    }
+)
 
 
-def box_quads(
-    x0: float, y0: float, z0: float, x1: float, y1: float, z1: float
-) -> np.ndarray:
-    """Build the six textured faces of one axis-aligned box with auto-UV."""
-    lo = (float(x0), float(y0), float(z0))
-    hi = (float(x1), float(y1), float(z1))
-    quads = np.empty(6, dtype=QUAD_DTYPE)
-    for tier in range(6):
-        points = [
-            tuple(lo[axis] if corner[axis] == 0 else hi[axis] for axis in range(3))
-            for corner in _FACE_CORNERS[tier]
-        ]
-        quads["vtx"][tier] = points
-        quads["uv"][tier] = [_auto_uv(tier, *point) for point in points]
-        quads["shade"][tier] = tier
-    quads["texkey"] = ""
-    quads["dbl"] = False
-    return quads
+def _fence(properties: Mapping[str, str]) -> np.ndarray:
+    """Fence: center post plus two rails on every connected side."""
+    boxes: list[Box] = [_FENCE_POST]
+    for side in _SIDES:
+        if _flag(properties, side):
+            boxes.extend(_FENCE_ARMS[side])
+    return _combine(boxes)
 
 
-def _auto_uv(tier: int, x: float, y: float, z: float) -> tuple[float, float]:
-    """Map one box corner to texel coords per the pinned auto-UV axes."""
-    if tier == TIER_DOWN:
-        return (x, 16.0 - z)
-    if tier == TIER_UP:
-        return (x, z)
-    if tier == TIER_NORTH:
-        return (16.0 - x, 16.0 - y)
-    if tier == TIER_SOUTH:
-        return (x, 16.0 - y)
-    if tier == TIER_WEST:
-        return (16.0 - z, 16.0 - y)
-    return (z, 16.0 - y)
-
-
-def _combine(boxes: list[Box]) -> np.ndarray:
-    """Concatenate the six-face quads of several boxes into one array."""
-    return np.concatenate([box_quads(*box) for box in boxes])
-
-
-def _text(properties: Mapping[str, str], key: str, default: str) -> str:
-    """Read one property as a string, falling back when missing or odd."""
-    value = properties.get(key, default)
-    return value if isinstance(value, str) else default
-
-
-def _flag(properties: Mapping[str, str], key: str) -> bool:
-    """Read one property as a boolean flag (only "true" counts)."""
-    return _text(properties, key, "false") == "true"
-
-
-def _facing(properties: Mapping[str, str]) -> str:
-    """Read the facing property, limited to the four horizontal names."""
-    value = _text(properties, "facing", "north")
-    return value if value in _FACINGS else "north"
-
-
-def _count(
-    properties: Mapping[str, str], key: str, default: int, lo: int, hi: int
-) -> int:
-    """Read one property as an integer clamped into [lo, hi]."""
-    raw = _text(properties, key, "")
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return max(lo, min(hi, value))
-
-
-def _fluid(properties: Mapping[str, str]) -> np.ndarray:
-    """Water, lava and bubble columns: level drops the surface."""
-    level = _count(properties, "level", 0, 0, 15)
-    return box_quads(0, 0, 0, 16, max(1, 16 - level), 16)
-
-
-def _snow(properties: Mapping[str, str]) -> np.ndarray:
-    """Snow layers: each layer adds two texels of height."""
-    layers = _count(properties, "layers", 1, 1, 8)
-    return box_quads(0, 0, 0, 16, layers * 2, 16)
-
-
-def _slab(properties: Mapping[str, str]) -> np.ndarray:
-    """Slab: bottom/top half box; double is a full cube."""
-    kind = _text(properties, "type", "bottom")
-    if kind == "double":
-        return box_quads(0, 0, 0, 16, 16, 16)
-    if kind == "top":
-        return box_quads(0, 8, 0, 16, 16, 16)
-    return box_quads(0, 0, 0, 16, 8, 16)
-
-
-def _stairs(properties: Mapping[str, str]) -> np.ndarray:
-    """Stairs: full-width base half slab plus a facing step box."""
-    top = _text(properties, "half", "bottom") == "top"
-    base: Box = (0, 8, 0, 16, 16, 16) if top else (0, 0, 0, 16, 8, 16)
-    step_y = (0.0, 8.0) if top else (8.0, 16.0)
-    x0, x1, z0, z1 = _STAIR_STEP[_facing(properties)]
-    return _combine([base, (x0, step_y[0], z0, x1, step_y[1], z1)])
-
-
-def _carpet(properties: Mapping[str, str]) -> np.ndarray:
-    """Carpet: one-texel-thick full-footprint sheet."""
-    return box_quads(0, 0, 0, 16, 1, 16)
-
-
-def _rail(properties: Mapping[str, str]) -> np.ndarray:
-    """Rail: one-texel-thick full-footprint sheet."""
-    return box_quads(0, 0, 0, 16, 1, 16)
-
-
-def _pressure_plate(properties: Mapping[str, str]) -> np.ndarray:
-    """Pressure plate: one-texel-thick inset sheet."""
-    return box_quads(1, 0, 1, 15, 1, 15)
-
-
-def _repeater(properties: Mapping[str, str]) -> np.ndarray:
-    """Repeater and comparator: low inset panel."""
-    return box_quads(2, 0, 2, 14, 2, 14)
-
-
-def _trapdoor(properties: Mapping[str, str]) -> np.ndarray:
-    """Trapdoor: thin slab at the half plane, edge panel when open."""
+def _fence_gate(properties: Mapping[str, str]) -> np.ndarray:
+    """Fence gate: center post plus a bar swung aside when open."""
+    along_x = _facing(properties) in ("north", "south")
+    bar = _GATE_BAR_X if along_x else _GATE_BAR_Z
     if _flag(properties, "open"):
-        return box_quads(*_OPEN_TRAPDOOR[_facing(properties)])
-    if _text(properties, "half", "bottom") == "top":
-        return box_quads(0, 13, 0, 16, 16, 16)
-    return box_quads(0, 0, 0, 16, 3, 16)
+        bar = _GATE_BAR_Z if along_x else _GATE_BAR_X
+    return _combine([_GATE_POST, bar])
 
 
-def _door(properties: Mapping[str, str]) -> np.ndarray:
-    """Door: three-texel facing panel, swung sideways when open."""
-    table = _DOOR_OPEN if _flag(properties, "open") else _DOOR_CLOSED
-    return box_quads(*table[_facing(properties)])
+def _side(properties: Mapping[str, str], key: str) -> bool:
+    """True when a wall side property is present and not "none"."""
+    return _text(properties, key, "none") != "none"
 
 
-def _ladder(properties: Mapping[str, str]) -> np.ndarray:
-    """Ladder: two-texel panel flush against the facing wall."""
-    return box_quads(*_LADDER[_facing(properties)])
+def _wall(properties: Mapping[str, str]) -> np.ndarray:
+    """Wall: center column plus one arm per connected side."""
+    top = 16.0 if _flag(properties, "up") else 14.0
+    boxes: list[Box] = [(4, 0, 4, 12, top, 12)]
+    for side in _SIDES:
+        if _side(properties, side):
+            boxes.append(_WALL_ARMS[side])
+    return _combine(boxes)
 
 
-def _button(properties: Mapping[str, str]) -> np.ndarray:
-    """Button: small pad on the floor, ceiling, or facing wall."""
-    face = _text(properties, "face", "floor")
-    if face == "ceiling":
-        return box_quads(5, 14, 5, 11, 16, 11)
-    if face == "wall":
-        return box_quads(*_BUTTON_WALL[_facing(properties)])
-    return box_quads(5, 0, 5, 11, 2, 11)
+def _pane(properties: Mapping[str, str]) -> np.ndarray:
+    """Pane and iron bars: center post plus arms, full bar when alone."""
+    boxes: list[Box] = [_PANE_POST]
+    connected = False
+    for side in _SIDES:
+        if _flag(properties, side):
+            boxes.append(_PANE_ARMS[side])
+            connected = True
+    if not connected:
+        boxes.append(_PANE_BAR)
+    return _combine(boxes)
 
 
-def _sign(properties: Mapping[str, str]) -> np.ndarray:
-    """Sign (standing or wall): two-texel post slab."""
-    return box_quads(7, 0, 0, 9, 16, 16)
-
-
-def _banner(properties: Mapping[str, str]) -> np.ndarray:
-    """Banner (standing or wall): two-texel post slab."""
-    return box_quads(7, 0, 0, 9, 16, 16)
-
-
-def _chest(properties: Mapping[str, str]) -> np.ndarray:
-    """Chest family: 14-texel box leaving seam margins."""
-    return box_quads(1, 0, 1, 15, 14, 15)
-
-
-def _shulker_box(properties: Mapping[str, str]) -> np.ndarray:
-    """Shulker box: slightly inset full-height box."""
-    return box_quads(1, 0, 1, 15, 16, 15)
-
-
-def _barrel(properties: Mapping[str, str]) -> np.ndarray:
-    """Barrel: slightly inset full-height box."""
-    return box_quads(1, 0, 1, 15, 16, 15)
-
-
-def _head(properties: Mapping[str, str]) -> np.ndarray:
-    """Head and skull: centered 8x8x8 box."""
-    return box_quads(4, 0, 4, 12, 8, 12)
-
-
-def _cactus(properties: Mapping[str, str]) -> np.ndarray:
-    """Cactus: inset full-height column."""
-    return box_quads(1, 0, 1, 15, 16, 15)
-
-
-def _lily_pad(properties: Mapping[str, str]) -> np.ndarray:
-    """Lily pad: one-texel-thick full-footprint sheet."""
-    return box_quads(0, 0, 0, 16, 1, 16)
-
-
-def _conduit(properties: Mapping[str, str]) -> np.ndarray:
-    """Conduit: centered 8x8x8 core."""
-    return box_quads(4, 4, 4, 12, 12, 12)
-
-
-def _lectern(properties: Mapping[str, str]) -> np.ndarray:
-    """Lectern: full-footprint base plus a centered desk box."""
-    return _combine([(0, 0, 0, 16, 4, 16), (4, 4, 4, 12, 12, 12)])
-
-
-def _torch_standing(properties: Mapping[str, str]) -> np.ndarray:
-    """Standing torch: small centered post."""
-    return box_quads(7, 0, 7, 9, 10, 9)
-
-
-def _torch_wall(properties: Mapping[str, str]) -> np.ndarray:
-    """Wall torch: small post lying against the facing wall."""
-    return box_quads(*_TORCH_WALL[_facing(properties)])
+def _cross(properties: Mapping[str, str]) -> np.ndarray:
+    """Cross plant: two diagonal double-sided planes at full height."""
+    quads = np.empty(2, dtype=QUAD_DTYPE)
+    quads["vtx"] = _CROSS_VTX
+    quads["uv"] = _CROSS_UV
+    quads["texkey"] = ""
+    quads["shade"] = TIER_UP
+    quads["dbl"] = True
+    return quads
 
 
 def _named(*names: str) -> Callable[[str], bool]:
@@ -320,9 +230,25 @@ def _is_torch(stem: str) -> bool:
     return stem == "torch" or stem.endswith("_torch")
 
 
+def _is_pane(stem: str) -> bool:
+    """Match glass panes and the iron bars block."""
+    return stem == "iron_bars" or stem.endswith("_pane")
+
+
+def _is_cross(stem: str) -> bool:
+    """Match cross-plant names and sapling/propagule suffixes."""
+    return stem in _CROSS_PLANTS or stem.endswith(("_sapling", "_propagule"))
+
+
 # Ordered dispatch, earlier rows win: wall torches must precede standing
-# torches because "*_wall_torch" also ends with "_torch".
+# torches because "*_wall_torch" also ends with "_torch". The other rows
+# are pairwise disjoint and keep Blockscope's precedence for reference.
 _FAMILIES: tuple[tuple[Callable[[str], bool], Builder], ...] = (
+    (_suffixed("_fence_gate"), _fence_gate),
+    (_suffixed("_fence"), _fence),
+    (_suffixed("_wall"), _wall),
+    (_is_pane, _pane),
+    (_is_cross, _cross),
     (_named("water", "lava", "bubble_column"), _fluid),
     (_named("snow"), _snow),
     (_suffixed("_slab"), _slab),

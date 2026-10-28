@@ -283,8 +283,167 @@ def test_contract_violations_raise_render_error():
         builtin_quads("water", "level=3")
 
 
+def test_fence_post_and_arms_follow_properties():
+    lone = builtin_quads("oak_fence", {})
+    assert _extent(lone) == ((6, 0, 6), (10, 16, 10))
+    assert len(lone) == 6
+    north = builtin_quads("oak_fence", {"north": "true"})
+    assert len(north) == 18
+    assert _span(north, 0) == (6.0, 10.0)
+    assert _span(north, 1) == (0.0, 16.0)
+    assert _span(north, 2) == (0.0, 10.0)
+    rails = north[north["vtx"][:, :, 2].min(axis=1) == 0.0]
+    assert sorted(set(rails["vtx"][:, :, 1].ravel().tolist())) == [
+        6.0,
+        9.0,
+        12.0,
+        15.0,
+    ]
+    all_sides = builtin_quads(
+        "oak_fence",
+        {"north": "true", "south": "true", "east": "true", "west": "true"},
+    )
+    assert _extent(all_sides) == ((0, 0, 0), (16, 16, 16))
+    assert len(all_sides) == 54
+
+
+def test_fence_gate_bar_swings_when_open():
+    closed_north = builtin_quads("oak_fence_gate", {"facing": "north"})
+    assert len(closed_north) == 12
+    assert _extent(closed_north) == ((0, 0, 6), (16, 16, 10))
+    open_north = builtin_quads(
+        "oak_fence_gate", {"facing": "north", "open": "true"}
+    )
+    assert _extent(open_north) == ((6, 0, 0), (10, 16, 16))
+    closed_east = builtin_quads("oak_fence_gate", {"facing": "east"})
+    assert _extent(closed_east) == ((6, 0, 0), (10, 16, 16))
+    open_east = builtin_quads(
+        "oak_fence_gate", {"facing": "east", "open": "true"}
+    )
+    assert _extent(open_east) == ((0, 0, 6), (16, 16, 10))
+
+
+def test_wall_post_height_and_arms():
+    lone = builtin_quads("cobblestone_wall", {})
+    assert _extent(lone) == ((4, 0, 4), (12, 14, 12))
+    up = builtin_quads("cobblestone_wall", {"up": "true"})
+    assert _extent(up) == ((4, 0, 4), (12, 16, 12))
+    north = builtin_quads("cobblestone_wall", {"north": "low", "up": "true"})
+    assert len(north) == 12
+    assert _span(north, 0) == (4.0, 12.0)
+    assert _span(north, 2) == (0.0, 12.0)
+    both = builtin_quads("cobblestone_wall", {"north": "tall", "south": "low"})
+    assert _span(both, 2) == (0.0, 16.0)
+    assert len(both) == 18
+    none_side = builtin_quads("cobblestone_wall", {"east": "none"})
+    assert _extent(none_side) == ((4, 0, 4), (12, 14, 12))
+
+
+def test_pane_unconnected_is_full_bar():
+    pane = builtin_quads("glass_pane", {})
+    assert _extent(pane) == ((7, 0, 0), (9, 16, 16))
+    assert len(pane) == 12
+
+
+def test_pane_arms_follow_connections():
+    north = builtin_quads("glass_pane", {"north": "true"})
+    assert _extent(north) == ((7, 0, 0), (9, 16, 9))
+    assert len(north) == 12
+    cross = builtin_quads(
+        "glass_pane",
+        {"north": "true", "south": "true", "east": "true", "west": "true"},
+    )
+    assert _extent(cross) == ((0, 0, 0), (16, 16, 16))
+    assert len(cross) == 30
+
+
+def test_iron_bars_share_pane_geometry():
+    bars = builtin_quads("iron_bars", {"east": "true"})
+    assert _extent(bars) == ((7, 0, 7), (16, 16, 9))
+    assert len(bars) == 12
+
+
+def test_cross_plant_two_double_sided_quads():
+    quads = builtin_quads("poppy", {})
+    assert quads.dtype == QUAD_DTYPE
+    assert len(quads) == 2
+    assert quads["dbl"].all()
+    assert (quads["texkey"] == "").all()
+    assert (quads["shade"] == TIER_UP).all()
+    assert _span(quads, 1) == (0.0, 16.0)
+    for quad in quads["vtx"]:
+        bottom = quad[:2]
+        along_xz = np.allclose(bottom[:, 0], bottom[:, 2])
+        anti_diagonal = np.allclose(bottom[:, 0] + bottom[:, 2], 16.0)
+        assert along_xz or anti_diagonal
+
+
+def test_cross_plant_name_list_matches():
+    names = (
+        "short_grass",
+        "tall_grass",
+        "fern",
+        "large_fern",
+        "dandelion",
+        "poppy",
+        "blue_orchid",
+        "allium",
+        "azure_bluet",
+        "oxeye_daisy",
+        "cornflower",
+        "lily_of_the_valley",
+        "red_tulip",
+        "orange_tulip",
+        "white_tulip",
+        "pink_tulip",
+        "sunflower",
+        "lilac",
+        "rose_bush",
+        "peony",
+        "vine",
+        "cobweb",
+        "bamboo",
+        "dead_bush",
+        "seagrass",
+        "kelp",
+        "kelp_plant",
+        "sugar_cane",
+        "wheat",
+        "carrots",
+        "potatoes",
+        "beetroots",
+        "torchflower",
+        "pitcher_plant",
+        "bush",
+        "sweet_berry_bush",
+        "tall_seagrass",
+        "red_mushroom",
+        "brown_mushroom",
+        "crimson_roots",
+        "warped_roots",
+        "nether_sprouts",
+        "crimson_fungus",
+        "warped_fungus",
+        "oak_sapling",
+        "mangrove_propagule",
+        "minecraft:poppy",
+    )
+    for name in names:
+        quads = builtin_quads(name, {})
+        assert quads is not None, name
+        assert len(quads) == 2, name
+        assert quads["dbl"].all(), name
+
+
 def test_multi_box_families_stay_parallelograms():
     stairs = builtin_quads("oak_stairs", {"facing": "east", "half": "bottom"})
     lectern = builtin_quads("lectern", {})
-    assert is_parallelogram(stairs).all()
-    assert is_parallelogram(lectern).all()
+    fence = builtin_quads("oak_fence", {"north": "true"})
+    gate = builtin_quads(
+        "oak_fence_gate", {"facing": "north", "open": "true"}
+    )
+    wall = builtin_quads("cobblestone_wall", {"north": "low"})
+    pane = builtin_quads("glass_pane", {"east": "true"})
+    plant = builtin_quads("poppy", {})
+    for quads in (stairs, lectern, fence, gate, wall, pane, plant):
+        assert is_parallelogram(quads).all()
