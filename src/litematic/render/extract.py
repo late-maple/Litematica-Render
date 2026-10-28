@@ -68,9 +68,10 @@ def _extract_pack(
             for n in names
             if n.startswith("assets/") and "/blockstates/" in n and n.endswith(".json")
         )
-        if not state_files:
+        if not state_files and not _fallback_blocks(names):
             raise RenderError(
-                f"extract: not a resource pack: {src}: no blockstates under assets/"
+                "extract: not a resource pack: "
+                f"{src}: no blockstates or block textures under assets/"
             )
         _require_pillow()
         texture_cache: dict[str, np.ndarray | None] = {}
@@ -79,6 +80,7 @@ def _extract_pack(
         maps: dict[str, str] = {}
         blocks = 0
         skipped = 0
+        covered: set[str] = set()
         for state_name in state_files:
             try:
                 state_maps = _extract_block(
@@ -93,9 +95,30 @@ def _extract_pack(
                 skipped += 1
                 continue
             block_id = _block_id(state_name)
+            covered.add(block_id)
             for state_key, faces in state_maps.items():
                 for face, array_key in faces.items():
                     maps[f"map/{block_id}[{state_key}]/{face}"] = array_key
+            blocks += 1
+        for ns, stem in _fallback_blocks(names):
+            block_id = f"{ns}:{stem}"
+            if block_id in covered:
+                continue
+            tex_ref = f"block/{stem}"
+            tex_key = _texture_key(tex_ref, ns)
+            raw = _load_texture(archive, names, ns, tex_ref, tex_key, texture_cache)
+            if raw is None:
+                continue
+            tint = _tint_for(block_id, "")
+            if tint is None:
+                tex_arrays.setdefault(tex_key, raw)
+                array_key = tex_key
+            else:
+                array_key = f"{tex_key}@{tint[0]},{tint[1]},{tint[2]}"
+                if array_key not in tex_arrays:
+                    tex_arrays[array_key] = _apply_tint(raw, tint)
+            for face in _ALL_FACES:
+                maps[f"map/{block_id}[]/{face}"] = array_key
             blocks += 1
     _write_npz(Path(dest), tex_arrays, maps, pack_mtime)
     return ExtractSummary(Path(dest), blocks, skipped)
@@ -334,6 +357,28 @@ def _block_id(state_name: str) -> str:
     ns = parts[1]
     stem = parts[-1][: -len(".json")]
     return f"{ns}:{stem}"
+
+
+def _fallback_blocks(names: set[str]) -> list[tuple[str, str]]:
+    """List (namespace, stem) for textures directly under textures/block/."""
+    out: list[tuple[str, str]] = []
+    for name in sorted(names):
+        parts = name.split("/")
+        if (
+            len(parts) != 5
+            or parts[0] != "assets"
+            or parts[2] != "textures"
+            or parts[3] != "block"
+            or not parts[4].endswith(".png")
+        ):
+            continue
+        stem = parts[4][: -len(".png")]
+        if not stem or not all(
+            c.islower() or c.isdigit() or c == "_" for c in stem
+        ):
+            continue
+        out.append((parts[1], stem))
+    return out
 
 
 def _tint_for(block_id: str, state_key: str) -> tuple[int, int, int] | None:

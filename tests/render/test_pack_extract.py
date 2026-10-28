@@ -159,7 +159,10 @@ def test_parent_chain_merge_child_overrides(tmp_path):
     }
     data = _load_npz(_extract(tmp_path, entries))
     assert _ref(data, "minecraft:child", "", "up") == "block/new"
-    assert "tex/block/old" not in data.files
+    assert all(
+        _ref(data, "minecraft:child", "", face) == "block/new"
+        for face in ("up", "down", "north", "south", "west", "east")
+    )
 
 
 def test_variant_y_rotation_swaps_faces(tmp_path):
@@ -440,3 +443,76 @@ def test_unwritable_dest_raises_render_error(tmp_path):
     dest = tmp_path / "missing_dir" / "out.npz"
     with pytest.raises(RenderError, match="extract:"):
         _extract_pack(pack, dest)
+
+
+def _texture_only_entries():
+    return {
+        "assets/minecraft/textures/block/stone.png": _solid_png(
+            (200, 30, 30, 255)
+        ),
+        "assets/minecraft/textures/block/grass_block.png": _solid_png(
+            (255, 255, 255, 255)
+        ),
+        "assets/modmenu/textures/gui/mods_button.png": _solid_png(
+            (9, 9, 9, 255)
+        ),
+        "assets/minecraft/textures/block/nested/deep.png": _solid_png(
+            (1, 2, 3, 255)
+        ),
+        "assets/minecraft/textures/item/stick.png": _solid_png((4, 5, 6, 255)),
+        "assets/minecraft/textures/block/UPPER.png": _solid_png((7, 7, 7, 255)),
+    }
+
+
+def test_texture_only_pack_falls_back_to_block_textures(tmp_path):
+    data = _load_npz(_extract(tmp_path, _texture_only_entries()))
+    for face in ("up", "down", "north", "south", "west", "east"):
+        assert _ref(data, "minecraft:stone", "", face) == "block/stone"
+    assert (
+        _tex(data, "block/stone") == (200, 30, 30, 255)
+    ).all()
+    assert "map/modmenu:mods_button[]/up" not in data.files
+    assert "map/minecraft:deep[]/up" not in data.files
+    assert "map/minecraft:stick[]/up" not in data.files
+    assert "map/minecraft:UPPER[]/up" not in data.files
+
+
+def test_texture_fallback_tints_by_block_name(tmp_path):
+    data = _load_npz(_extract(tmp_path, _texture_only_entries()))
+    key = _ref(data, "minecraft:grass_block", "", "up")
+    assert key == "block/grass_block@145,189,89"
+    assert (_tex(data, key) == (145, 189, 89, 255)).all()
+
+
+def test_fallback_skips_blockstate_covered_blocks(tmp_path):
+    entries = _stone_entries(
+        **{
+            "assets/minecraft/textures/block/dirt.png": _solid_png(
+                (120, 85, 60, 255)
+            )
+        }
+    )
+    dest = tmp_path / "out.npz"
+    summary = _extract_pack(
+        _make_pack(tmp_path / "pack.zip", entries), dest
+    )
+    data = _load_npz(dest)
+    assert "map/minecraft:dirt[]/up" in data.files
+    assert summary.blocks == 2
+    assert summary.skipped == 0
+
+
+def test_foreign_namespace_texture_fallback(tmp_path):
+    entries = {
+        "assets/create/textures/block/limestone.png": _solid_png(
+            (180, 180, 170, 255)
+        )
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    assert _ref(data, "create:limestone", "", "up") == "create:block/limestone"
+
+
+def test_pack_without_blockstates_or_block_textures_rejected(tmp_path):
+    entries = {"assets/minecraft/textures/item/stick.png": _solid_png((4, 5, 6, 255))}
+    with pytest.raises(RenderError, match="not a resource pack"):
+        _extract(tmp_path, entries)
