@@ -516,3 +516,73 @@ def test_pack_without_blockstates_or_block_textures_rejected(tmp_path):
     entries = {"assets/minecraft/textures/item/stick.png": _solid_png((4, 5, 6, 255))}
     with pytest.raises(RenderError, match="not a resource pack"):
         _extract(tmp_path, entries)
+
+
+def _stub_water_entries():
+    return {
+        "assets/minecraft/blockstates/water.json": _blockstates("block/water"),
+        "assets/minecraft/models/block/water.json": json.dumps(
+            {"textures": {"particle": "block/water_still"}}
+        ),
+        "assets/minecraft/textures/block/water_still.png": _solid_png(
+            (255, 255, 255, 255)
+        ),
+    }
+
+
+def test_stub_model_falls_back_to_particle_texture(tmp_path):
+    data = _load_npz(_extract(tmp_path, _stub_water_entries()))
+    for face in ("up", "east", "south"):
+        key = _ref(data, "minecraft:water", "", face)
+        assert key == "block/water_still@63,118,228"
+    assert (
+        _tex(data, "block/water_still@63,118,228") == (63, 118, 228, 255)
+    ).all()
+
+
+def test_stub_model_without_texture_stays_unresolved(tmp_path):
+    entries = {
+        "assets/minecraft/blockstates/portal.json": _blockstates("block/portal"),
+        "assets/minecraft/models/block/portal.json": json.dumps(
+            {"textures": {"particle": "block/missing"}}
+        ),
+    }
+    dest = tmp_path / "out.npz"
+    summary = _extract_pack(_make_pack(tmp_path / "pack.zip", entries), dest)
+    data = _load_npz(dest)
+    assert summary.skipped == 1
+    assert not [k for k in data.files if k.startswith("map/minecraft:portal[")]
+
+
+def test_stub_parent_chain_supplies_texture(tmp_path):
+    entries = {
+        "assets/minecraft/blockstates/flow.json": _blockstates("block/flow"),
+        "assets/minecraft/models/block/flow.json": json.dumps(
+            {"parent": "block/base"}
+        ),
+        "assets/minecraft/models/block/base.json": json.dumps(
+            {"textures": {"particle": "block/still"}}
+        ),
+        "assets/minecraft/textures/block/still.png": _solid_png(
+            (10, 20, 30, 255)
+        ),
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    assert _ref(data, "minecraft:flow", "", "up") == "block/still"
+
+
+def test_builtin_parent_stays_unresolved(tmp_path):
+    entries = {
+        "assets/minecraft/blockstates/chest.json": _blockstates("block/chest"),
+        "assets/minecraft/models/block/chest.json": json.dumps(
+            {"parent": "builtin/entity", "textures": {"particle": "block/planks"}}
+        ),
+        "assets/minecraft/textures/block/planks.png": _solid_png(
+            (1, 2, 3, 255)
+        ),
+    }
+    dest = tmp_path / "out.npz"
+    summary = _extract_pack(_make_pack(tmp_path / "pack.zip", entries), dest)
+    data = _load_npz(dest)
+    assert summary.skipped == 1
+    assert not [k for k in data.files if k.startswith("map/minecraft:chest[")]

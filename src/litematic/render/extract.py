@@ -251,10 +251,38 @@ def _cached_model(
     key = f"{ns}|{ref}"
     if key not in cache:
         model = _resolve_model(archive, names, ns, ref)
-        if model is not None:
+        if model is None:
+            cache[key] = None
+        elif model["elements"] is None:
+            faces = _stub_faces(names, ns, model["textures"])
+            if faces is None:
+                cache[key] = None
+            else:
+                cache[key] = {
+                    "textures": model["textures"],
+                    "elements": [],
+                    "faces": faces,
+                }
+        else:
             model["faces"] = _face_textures(model)
-        cache[key] = model
+            cache[key] = model
     return cache[key]
+
+
+def _stub_faces(
+    names: set[str], ns: str, textures: dict[str, Any]
+) -> dict[str, dict[str, Any]] | None:
+    """Synthesize six cube faces from an element-less model's textures."""
+    for value in textures.values():
+        if not isinstance(value, str) or value.startswith("#"):
+            continue
+        path = _asset_path(ns, value, "textures", ".png")
+        if path is not None and path in names:
+            return {
+                face: {"texture": value, "tintindex": 0}
+                for face in _ALL_FACES
+            }
+    return None
 
 
 def _resolve_model(
@@ -284,7 +312,9 @@ def _resolve_model(
         parent = model.get("parent")
         ref = parent if isinstance(parent, str) else None
     if elements is None:
-        return None
+        if ref is not None:
+            return None
+        return {"textures": merged_textures, "elements": None}
     return {"textures": merged_textures, "elements": elements}
 
 
