@@ -25,6 +25,9 @@ __all__ = ["Textures", "load_pack"]
 
 _CACHE_SUFFIX = ".litematic-tex.npz"
 
+# In-process cache keyed (path, mtime); skips re-reading the npz per render.
+_PACK_CACHE: dict[tuple[str, float], "Textures"] = {}
+
 
 class Textures(NamedTuple):
     """Pack textures and per-state quads resolved from the extraction cache."""
@@ -157,8 +160,13 @@ def load_pack(pack_path: str | Path) -> Textures:
             f"load: not a resource pack: {pack_file}: {exc}"
         ) from exc
     cache = pack_file.with_name(pack_file.stem + _CACHE_SUFFIX)
+    key = (str(pack_file.resolve()), mtime)
+    hit = _PACK_CACHE.get(key)
+    if hit is not None:
+        return hit
     cached = _read_cache(cache, mtime)
     if cached is not None:
+        _PACK_CACHE[key] = cached
         return cached
     try:
         _extract_pack(pack_file, cache, pack_mtime=mtime)
@@ -168,6 +176,7 @@ def load_pack(pack_path: str | Path) -> Textures:
     loaded = _parse_textures(cache)
     if loaded is None or loaded.pack_mtime != mtime:
         raise RenderError(f"load: cache unreadable after extraction: {cache}")
+    _PACK_CACHE[key] = loaded
     return loaded
 
 

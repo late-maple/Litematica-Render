@@ -485,8 +485,12 @@ def test_redstone_wire_malformed_power_falls_to_zero():
     assert q["texkey"][0] == "block/redstone_dust_dot@76,0,0"
 
 
-def test_composter_is_inset_box():
+def test_composter_full_cube():
     q = builtin_quads("minecraft:composter", {"level": "3"})
     assert len(q) == 6
-    assert q["vtx"][..., 0].min() == 1.0
-    assert q["vtx"][..., 0].max() == 15.0
+    assert q["vtx"][..., 0].min() == 0.0
+    assert q["vtx"][..., 0].max() == 16.0
+    assert q["vtx"][..., 1].min() == 0.0
+    assert q["vtx"][..., 1].max() == 16.0
+    assert q["vtx"][..., 2].min() == 0.0
+    assert q["vtx"][..., 2].max() == 16.0

@@ -173,9 +173,10 @@ def _compile_elements(
                     for corner in corners
                 ]
             cullface = face.get("cullface")
+            # A non-string cullface drops the face's cull, not the block.
             cull = (
-                _FACE_TIER[_rotate(str(cullface), x_rot, y_rot)]
-                if cullface in _VEC
+                _FACE_TIER[_rotate(cullface, x_rot, y_rot)]
+                if isinstance(cullface, str) and cullface in _VEC
                 else CULL_NONE
             )
             rows.append(

@@ -1754,6 +1754,30 @@ def test_missing_cullface_defaults_to_none(tmp_path):
     assert (quads["cull"] == CULL_NONE).all()
 
 
+def test_non_string_cullface_degrades_to_none(tmp_path):
+    faces = {
+        name: {"texture": "#all"}
+        for name in ("down", "up", "south", "west", "east")
+    }
+    faces["north"] = {"texture": "#all", "cullface": ["north"]}
+    entries = _stone_entries(
+        **{
+            "assets/minecraft/models/block/stone.json": json.dumps(
+                {
+                    "textures": {"all": "block/stone"},
+                    "elements": [
+                        {"from": [0, 0, 0], "to": [16, 16, 16], "faces": faces}
+                    ],
+                }
+            )
+        }
+    )
+    data = _load_npz(_extract(tmp_path, entries))
+    quads = data["quads/minecraft:stone[]"]
+    north = next(q for q in quads if int(q["shade"]) == TIER_NORTH)
+    assert int(north["cull"]) == CULL_NONE
+
+
 def test_pack_quads4_cache_rebuilds(tmp_path):
     pack_file = _make_pack(tmp_path / "pack.zip", _stone_entries())
     dest = tmp_path / "out.npz"

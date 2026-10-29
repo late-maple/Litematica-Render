@@ -209,16 +209,17 @@ def _compose_inner(schem: Litematic, yaw: int, textures: Textures) -> _Scene:
     rx, rz = _yaw_rot(x, z, yaw, int(x.max()) + 1, int(z.max()) + 1)
     span_w = int(rx.max()) + int(rz.max()) + 2
     span_h = int(rx.max()) + int(rz.max()) + 2 * int(y.max()) + 4
+    # Copy so the capacity-sized arena is not pinned by views.
     return _Scene(
         rx.astype(np.int32),
         y.astype(np.int32),
         rz.astype(np.int32),
-        arena.vtx[:written],
-        arena.uv[:written],
-        arena.ao[:written],
-        arena.shade[:written],
-        arena.dbl[:written],
-        arena.texkey[:written],
+        arena.vtx[:written].copy(),
+        arena.uv[:written].copy(),
+        arena.ao[:written].copy(),
+        arena.shade[:written].copy(),
+        arena.dbl[:written].copy(),
+        arena.texkey[:written].copy(),
         dict(key_arrays),
         span_w,
         span_h,
@@ -581,45 +582,66 @@ def _expand_slab_into(
     total = int(counts.sum())
     if total == 0:
         return 0
-    cell_of = np.repeat(np.arange(len(picked), dtype=np.int64), counts)
+    cell_of = np.repeat(
+        np.arange(len(picked), dtype=np.int32), counts
+    )
     starts = np.cumsum(counts) - counts
     within = np.arange(total, dtype=np.int64) - np.repeat(starts, counts)
     pool_idx = np.repeat(luts.offsets[picked], counts) + within
-    quads = pool[pool_idx]
-    cells = np.stack([lx[cell_of], ly[cell_of], lz[cell_of]], axis=1)
-    ids = luts.texkey_ids[pool_idx]
-    new_tier = tier_map[quads["shade"]]
-    keep = np.isin(new_tier, _CAMERA_TIERS)
-    quads = quads[keep]
-    cells = cells[keep]
-    ids = ids[keep]
-    cell_of = cell_of[keep]
+    # Structured rows carry a 256-byte texkey, so gather fields and chunk.
+    model_shade = pool["shade"][pool_idx]
+    keep = np.isin(tier_map[model_shade], _CAMERA_TIERS)
+    kept_at = np.flatnonzero(keep)
+    pool_rows = pool_idx[kept_at]
+    del pool_idx, keep
+    model_shade = model_shade[kept_at]
+    cell_of = cell_of[kept_at]
+    new_tier = tier_map[model_shade]
     wy0 = max(y0 - 1, 0)
     widx = region.slab_indices(wy0, min(y1 + 1, region.size.y))
     occ = _occlusion_window(widx, luts.occludes, wy0)
-    alive = _cull_alive(
-        quads, cells, picked[cell_of], luts.cull_class, occ, widx, wy0,
-        region.size.y,
-    )
-    quads = quads[alive]
-    cells = cells[alive]
-    count = len(cells)
-    end = offset + count
     px, py, pz = position
-    arena.x[offset:end] = cells[:, 0] + px
-    arena.y[offset:end] = cells[:, 1] + py
-    arena.z[offset:end] = cells[:, 2] + pz
-    arena.vtx[offset:end] = _rotate_vertices(quads["vtx"], yaw)
-    arena.uv[offset:end] = quads["uv"]
-    arena.ao[offset:end] = _vertex_ao(quads, cells, *occ)
-    arena.shade[offset:end] = new_tier[keep][alive]
-    arena.dbl[offset:end] = quads["dbl"]
-    arena.texkey[offset:end] = ids[alive]
-    return count
+    written = 0
+    chunk = 1 << 20
+    for start in range(0, len(pool_rows), chunk):
+        stop = min(start + chunk, len(pool_rows))
+        rows_c = pool_rows[start:stop]
+        cell_of_c = cell_of[start:stop]
+        cells = np.stack(
+            [lx[cell_of_c], ly[cell_of_c], lz[cell_of_c]], axis=1
+        )
+        alive = _cull_alive(
+            pool["cull"][rows_c],
+            cells,
+            picked[cell_of_c],
+            luts.cull_class,
+            occ,
+            widx,
+            wy0,
+            region.size.y,
+        )
+        cells = cells[alive]
+        rows = rows_c[alive]
+        vtx = pool["vtx"][rows]
+        dbl = pool["dbl"][rows]
+        end = offset + written + len(cells)
+        arena.x[offset + written : end] = cells[:, 0] + px
+        arena.y[offset + written : end] = cells[:, 1] + py
+        arena.z[offset + written : end] = cells[:, 2] + pz
+        arena.vtx[offset + written : end] = _rotate_vertices(vtx, yaw)
+        arena.uv[offset + written : end] = pool["uv"][rows]
+        arena.ao[offset + written : end] = _vertex_ao(
+            vtx, model_shade[start:stop][alive], dbl, cells, *occ
+        )
+        arena.shade[offset + written : end] = new_tier[start:stop][alive]
+        arena.dbl[offset + written : end] = dbl
+        arena.texkey[offset + written : end] = luts.texkey_ids[rows]
+        written += len(cells)
+    return written
 
 
 def _cull_alive(
-    quads: np.ndarray,
+    cull: np.ndarray,
     cells: np.ndarray,
     cell_palette: np.ndarray,
     cull_class: np.ndarray,
@@ -629,8 +651,7 @@ def _cull_alive(
     sy: int,
 ) -> np.ndarray:
     """Alive mask after neighbor culling; no-cullface rows always alive."""
-    mask = np.ones(len(quads), bool)
-    cull = quads["cull"]
+    mask = np.ones(len(cull), bool)
     rows = np.nonzero(cull != CULL_NONE)[0]
     if len(rows) == 0:
         return mask
@@ -689,29 +710,30 @@ def _rotate_vertices(vtx: np.ndarray, yaw: int) -> np.ndarray:
 
 
 def _vertex_ao(
-    quads: np.ndarray,
+    vtx: np.ndarray,
+    shade: np.ndarray,
+    dbl: np.ndarray,
     cells: np.ndarray,
     flat: np.ndarray,
     strides: tuple[int, int, int],
     y_base: int = 0,
 ) -> np.ndarray:
-    """Per-vertex AO multipliers from the padded flat occlusion grid."""
-    tier = quads["shade"].astype(np.int64)
+    """Per-vertex AO multipliers from the padded flat grid; vtx is pre-yaw."""
+    tier = shade.astype(np.int32)
     axes = _TIER_AXES[tier]
     normals = _TIER_NORMALS[tier]
     st_x, st_y, st_z = strides
-    steps = np.array([st_x, st_y, st_z], np.int64)
+    steps = np.array([st_x, st_y, st_z], np.int32)
     t1 = steps[axes[:, 1]]
     t2 = steps[axes[:, 2]]
-    vtx = quads["vtx"]
     pick1 = axes[:, 1][:, None, None]
     pick2 = axes[:, 2][:, None, None]
     # A vertex exactly on the block center plane (coord 8.0) signs to 0 and
     # samples the straight-out neighbor; the shape table keeps coords off 8.
     s1 = np.sign(np.take_along_axis(vtx, pick1, axis=2)[:, :, 0] - 8.0)
     s2 = np.sign(np.take_along_axis(vtx, pick2, axis=2)[:, :, 0] - 8.0)
-    s1 = s1.astype(np.int64)
-    s2 = s2.astype(np.int64)
+    s1 = s1.astype(np.int32)
+    s2 = s2.astype(np.int32)
     cells32 = cells.astype(np.int32)
     base = (
         (cells32[:, 0] + 1) * np.int32(st_x)
@@ -721,10 +743,10 @@ def _vertex_ao(
         + normals[:, 1] * np.int32(st_y)
         + normals[:, 2] * np.int32(st_z)
     )[:, None]
-    side1 = flat[base + s1 * t1[:, None]].astype(np.int64)
-    side2 = flat[base + s2 * t2[:, None]].astype(np.int64)
-    corner = flat[base + s1 * t1[:, None] + s2 * t2[:, None]].astype(np.int64)
+    side1 = flat[base + s1 * t1[:, None]].astype(np.int32)
+    side2 = flat[base + s2 * t2[:, None]].astype(np.int32)
+    corner = flat[base + s1 * t1[:, None] + s2 * t2[:, None]].astype(np.int32)
     level = np.where(side1 & side2, 0, 3 - (side1 + side2 + corner))
     ao = np.asarray(AO_LEVELS, np.float32)[level]
-    ao[quads["dbl"]] = 1.0
+    ao[dbl] = 1.0
     return ao

@@ -124,13 +124,15 @@ def test_cache_missing_meta_version_rebuilt(tmp_path):
     assert counter.calls == 1
 
 
-def test_bad_shape_entry_dropped(tmp_path):
+def test_bad_shape_entry_dropped(tmp_path, monkeypatch):
+    monkeypatch.setattr(pack_mod, "_PACK_CACHE", {})
     pack_file = _mini_pack(tmp_path / "pack.zip")
     load_pack(pack_file)
     cache = tmp_path / "pack.litematic-tex.npz"
     data = dict(np.load(cache, allow_pickle=False))
     data["quads/minecraft:stone[]"] = np.zeros((3, 4), np.uint8)
     np.savez(cache, **data)
+    pack_mod._PACK_CACHE.clear()
     counter = _Counter()
     pack_mod._extract_pack = counter
     try:
@@ -148,6 +150,7 @@ def test_quads_entry_with_unknown_texkey_dropped(tmp_path):
     data = dict(np.load(cache, allow_pickle=False))
     data["quads/minecraft:ghost[]"] = unit_cube_quads("block/ghost")
     np.savez(cache, **data)
+    pack_mod._PACK_CACHE.clear()
     textures = load_pack(pack_file)
     assert textures.quads("minecraft:ghost", {}) is None
     assert textures.quads("minecraft:stone", {}) is not None
@@ -198,7 +201,8 @@ def test_missing_pack_raises(tmp_path):
         load_pack(tmp_path / "nope.zip")
 
 
-def test_corrupt_cache_member_auto_rebuilds(tmp_path):
+def test_corrupt_cache_member_auto_rebuilds(tmp_path, monkeypatch):
+    monkeypatch.setattr(pack_mod, "_PACK_CACHE", {})
     pack_file = _mini_pack(tmp_path / "pack.zip")
     load_pack(pack_file)
     cache = tmp_path / "pack.litematic-tex.npz"
@@ -206,6 +210,7 @@ def test_corrupt_cache_member_auto_rebuilds(tmp_path):
     member = raw.index(b"tex/block/stone")
     raw[member + 120] ^= 0xFF  # flip a byte inside the compressed payload
     cache.write_bytes(bytes(raw))
+    pack_mod._PACK_CACHE.clear()
     counter = _Counter()
     pack_mod._extract_pack = counter
     try:
@@ -261,13 +266,15 @@ def test_two_arg_extract_produces_loadable_cache(tmp_path):
     assert parsed.version == "pack-quads.1"
 
 
-def test_old_cache_version_rebuilds(tmp_path):
+def test_old_cache_version_rebuilds(tmp_path, monkeypatch):
+    monkeypatch.setattr(pack_mod, "_PACK_CACHE", {})
     pack_file = _mini_pack(tmp_path / "pack.zip")
     load_pack(pack_file)
     cache = tmp_path / "pack.litematic-tex.npz"
     data = dict(np.load(cache, allow_pickle=False))
     data["meta/version"] = np.array("pack")  # simulate a v1 cache
     np.savez(cache, **data)
+    pack_mod._PACK_CACHE.clear()
     counter = _Counter()
     pack_mod._extract_pack = counter
     try:
@@ -449,7 +456,8 @@ def test_multipart_malformed_when_matches_nothing(tmp_path):
     assert len(quads) == 6
 
 
-def test_native_shape_cache_accepted(tmp_path):
+def test_native_shape_cache_accepted(tmp_path, monkeypatch):
+    monkeypatch.setattr(pack_mod, "_PACK_CACHE", {})
     """tex/ arrays of any (h, w, 4) uint8 shape load through unchanged."""
     pack_file = _mini_pack(tmp_path / "pack.zip")
     load_pack(pack_file)
@@ -457,6 +465,7 @@ def test_native_shape_cache_accepted(tmp_path):
     data = dict(np.load(cache, allow_pickle=False))
     data["tex/block/wide"] = np.zeros((8, 32, 4), np.uint8)
     np.savez(cache, **data)
+    pack_mod._PACK_CACHE.clear()
     textures = load_pack(pack_file)
     assert textures.arrays["block/wide"].shape == (8, 32, 4)
 
@@ -479,3 +488,37 @@ def test_native_texture_pack_renders_quads(tmp_path):
     textures = load_pack(tmp_path / "p.zip")
     assert textures.arrays["block/stone"].shape == (32, 32, 4)
     assert textures.quads("minecraft:stone", {}) is not None
+
+
+# Process cache returns the same Textures; a changed mtime reloads.
+
+
+def test_pack_cache_reuses_within_process(tmp_path, monkeypatch):
+    pack_file = _mini_pack(tmp_path / "pack.zip")
+    monkeypatch.setattr(pack_mod, "_PACK_CACHE", {})
+    counter = _Counter()
+    pack_mod._extract_pack = counter
+    try:
+        first = load_pack(pack_file)
+        second = load_pack(pack_file)
+    finally:
+        pack_mod._extract_pack = counter.real
+    assert counter.calls == 1
+    assert first is second
+
+
+def test_pack_cache_invalidates_on_mtime(tmp_path, monkeypatch):
+    pack_file = _mini_pack(tmp_path / "pack.zip")
+    monkeypatch.setattr(pack_mod, "_PACK_CACHE", {})
+    counter = _Counter()
+    pack_mod._extract_pack = counter
+    try:
+        load_pack(pack_file)
+        _mini_pack(pack_file, color=(10, 200, 10))
+        changed = load_pack(pack_file)
+    finally:
+        pack_mod._extract_pack = counter.real
+    assert counter.calls == 2
+    quads = changed.quads("minecraft:stone", {})
+    key = str(quads["texkey"][0])
+    assert (changed.arrays[key] == (10, 200, 10, 255)).all()

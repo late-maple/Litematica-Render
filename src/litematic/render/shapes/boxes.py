@@ -256,8 +256,8 @@ def _barrel(properties: Mapping[str, str]) -> np.ndarray:
 
 
 def _composter(properties: Mapping[str, str]) -> np.ndarray:
-    """Composter: slightly inset full-height box."""
-    return box_quads(1, 0, 1, 15, 16, 15)
+    """Composter: full cube per the vanilla model outline."""
+    return box_quads(0, 0, 0, 16, 16, 16)
 
 
 def _head(properties: Mapping[str, str]) -> np.ndarray:

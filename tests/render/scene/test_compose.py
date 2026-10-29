@@ -866,7 +866,9 @@ def test_padded_ao_equals_reference():
     )
     cells[0] = (0, 0, 0)
     cells[1] = (4, 3, 5)
-    out = _vertex_ao(quads, cells, flat, strides)
+    out = _vertex_ao(
+        quads["vtx"], quads["shade"], quads["dbl"], cells, flat, strides
+    )
     assert out.dtype == np.float32
     assert (out == _reference_ao(quads, cells, grid)).all()
 
@@ -887,7 +889,9 @@ def test_ao_boundary_cells_match_reference():
         [(0, 0, 0), (2, 2, 2), (0, 2, 1), (1, 0, 2),
          (2, 1, 0), (0, 1, 1), (1, 2, 0), (2, 0, 1)], np.int64
     )
-    out = _vertex_ao(quads, cells, flat, strides)
+    out = _vertex_ao(
+        quads["vtx"], quads["shade"], quads["dbl"], cells, flat, strides
+    )
     assert (out == _reference_ao(quads, cells, grid)).all()
 
 
@@ -996,6 +1000,23 @@ def test_arena_trim_removes_cull_slack():
     scene = _row_scene(entries, "minecraft:stone", "minecraft:stone")
     # Capacity is 2 cells x 3 camera faces; one face is culled.
     assert len(scene.x) == 5
+
+
+def test_scene_fields_do_not_pin_arena():
+    entries = {"minecraft:stone": ("block/stone", True)}
+    scene = _row_scene(entries, "minecraft:stone", "minecraft:stone")
+    for arr in (
+        scene.x,
+        scene.y,
+        scene.z,
+        scene.quad_vtx,
+        scene.quad_uv,
+        scene.quad_ao,
+        scene.quad_shade,
+        scene.quad_dbl,
+        scene.texkey_ids,
+    ):
+        assert arr.base is None
 
 
 def test_degenerate_regions():
