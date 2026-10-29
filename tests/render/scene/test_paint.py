@@ -8,6 +8,7 @@ from litematic import loads
 from litematic.render.errors import RenderError
 from litematic.render.pack import Textures
 from litematic.render.quads import QUAD_DTYPE, TIER_SOUTH, unit_cube_quads
+from litematic.render.scene import painter as painter_mod
 from litematic.render.scene.isometric import _compose
 from litematic.render.scene.painter import _paint
 
@@ -362,3 +363,64 @@ def test_mixed_shape_layer_deterministic():
     first = _paint(scene, 2, _BG)
     second = _paint(scene, 2, _BG)
     assert first.tobytes() == second.tobytes()
+
+
+# Sort-once layering: depth layers are contiguous slices of one stable
+# argsort; oversize layers split into sub-batches with identical output.
+
+
+def _depth_duplicate_scene():
+    return _scene(
+        [
+            ("minecraft:stone", {}, 0, 0, 0),
+            ("minecraft:glass", {}, 1, 0, 0),
+            ("minecraft:stone", {}, 0, 1, 0),
+            ("minecraft:glass", {}, 2, 0, 0),
+        ]
+    )
+
+
+def test_layer_order_matches_unique_scan():
+    scene = _depth_duplicate_scene()
+    t = 2
+    reference = np.empty((t * scene.span_h, 2 * t * scene.span_w, 4), np.uint8)
+    reference[:] = _BG
+    stacks, group_ids, slot_ids = painter_mod._texture_stack(scene)
+    quad_group = group_ids[scene.texkey_ids]
+    quad_slot = slot_ids[scene.texkey_ids]
+    sx, sy = painter_mod._project(scene, t)
+    depth = painter_mod._depth(scene)
+    for value in np.unique(depth):
+        layer = np.nonzero(depth == value)[0]
+        painter_mod._paint_layer(
+            reference, scene, layer, sx, sy, stacks, quad_group, quad_slot
+        )
+    assert reference.tobytes() == _paint(scene, t, _BG).tobytes()
+
+
+def test_equal_depth_preserves_index_order():
+    early = unit_cube_quads("block/early")[TIER_SOUTH : TIER_SOUTH + 1].copy()
+    late = unit_cube_quads("block/late")[TIER_SOUTH : TIER_SOUTH + 1].copy()
+    quads = np.concatenate([early, late])
+    textures = Textures(
+        version="pack-quads",
+        arrays={
+            "block/early": np.full((16, 16, 4), (255, 0, 0, 255), np.uint8),
+            "block/late": np.full((16, 16, 4), (0, 0, 255, 255), np.uint8),
+        },
+        quads_map={"minecraft:odd[]": quads},
+        occl_map={"minecraft:odd[]": False},
+        pack_mtime=0.0,
+        states=None,
+        parts_map={},
+        mquad_map={},
+    )
+    img = _paint(_scene([("minecraft:odd", {}, 0, 0, 0)], textures), 4, _BG)
+    assert tuple(img[10, 4]) == (0, 0, 204, 255)  # later quad's cover wins
+
+
+def test_subbatch_valve_identical_output(monkeypatch):
+    scene = _depth_duplicate_scene()
+    default = _paint(scene, 2, _BG)
+    monkeypatch.setattr(painter_mod, "_BATCH_PIXELS", 1)
+    assert _paint(scene, 2, _BG).tobytes() == default.tobytes()

@@ -9,6 +9,9 @@ from litematic.render.scene.isometric import _Scene
 _CUTOUT_ALPHA = 16
 _COVER_ALPHA = 250
 _FUSE_PIXELS = 1 << 25
+# Per-rasterize-call canvas-clipped bbox budget; oversized depth layers
+# split into contiguous quad sub-batches under it.
+_BATCH_PIXELS = 1 << 20
 # A projected quad rasterizes only when its edge vectors are not parallel;
 # the threshold is relative (a fraction of |e1|*|e2|) so it holds at every
 # tile scale and only true slivers / edge-on planes are dropped.
@@ -45,11 +48,14 @@ def _paint_inner(
     quad_slot = slot_ids[scene.texkey_ids]
     sx, sy = _project(scene, t)
     depth = _depth(scene)
-    for value in np.unique(depth):
-        layer = np.nonzero(depth == value)[0]
-        _paint_layer(
-            canvas, scene, layer, sx, sy, stacks, quad_group, quad_slot
-        )
+    order = np.argsort(depth, kind="stable")
+    edges = np.flatnonzero(np.diff(depth[order])) + 1
+    starts = np.concatenate(([0], edges))
+    stops = np.concatenate((edges, [len(order)]))
+    for lo, hi in zip(starts.tolist(), stops.tolist()):
+        _paint_layer(canvas, scene, order[lo:hi], sx, sy, stacks,
+                     quad_group, quad_slot)
+    del sx, sy, depth, order
     return canvas
 
 
@@ -161,23 +167,61 @@ def _paint_group(
         ao = np.concatenate([ao, ao[dbl, ::-1]])
         shade = np.concatenate([shade, shade[dbl]])
         tex = np.concatenate([tex, tex[dbl]])
-    rows, cols, values = _rasterize(
-        quad_sx,
-        quad_sy,
-        uv,
-        ao,
-        shade,
-        tex,
-        tex_hw,
-        canvas.shape[0],
-        canvas.shape[1],
-    )
-    alpha = values[:, 3]
-    cover = alpha >= _COVER_ALPHA
-    canvas[rows[cover], cols[cover]] = values[cover]
-    blend = (alpha >= _CUTOUT_ALPHA) & ~cover
-    if blend.any():
-        _blend_pixels(canvas, rows[blend], cols[blend], values[blend])
+    height, width = canvas.shape[:2]
+    pixels = _bbox_pixels(quad_sx, quad_sy, height, width)[0]
+    chunks = _layer_chunks(pixels, _BATCH_PIXELS)
+    deferred = []
+    for lo, hi in chunks:
+        rows, cols, values = _rasterize(
+            quad_sx[lo:hi],
+            quad_sy[lo:hi],
+            uv[lo:hi],
+            ao[lo:hi],
+            shade[lo:hi],
+            tex[lo:hi],
+            tex_hw,
+            height,
+            width,
+        )
+        alpha = values[:, 3]
+        cover = alpha >= _COVER_ALPHA
+        canvas[rows[cover], cols[cover]] = values[cover]
+        blend = (alpha >= _CUTOUT_ALPHA) & ~cover
+        if blend.any():
+            deferred.append((rows[blend], cols[blend], values[blend]))
+    for rows, cols, values in deferred:
+        _blend_pixels(canvas, rows, cols, values)
+
+
+def _bbox_pixels(
+    sx: np.ndarray, sy: np.ndarray, height: int, width: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Per-quad canvas-clipped bbox: (pixels, width, height, lo_col, lo_row)."""
+    lo_c = np.maximum(np.floor(sx.min(axis=1)), 0.0)
+    hi_c = np.minimum(np.ceil(sx.max(axis=1)), float(width))
+    lo_r = np.maximum(np.floor(sy.min(axis=1)), 0.0)
+    hi_r = np.minimum(np.ceil(sy.max(axis=1)), float(height))
+    width_q = np.maximum((hi_c - lo_c).astype(np.int64), 0)
+    height_q = np.maximum((hi_r - lo_r).astype(np.int64), 0)
+    return width_q * height_q, width_q, height_q, lo_c, lo_r
+
+
+def _layer_chunks(pixels: np.ndarray, budget: int) -> list[tuple[int, int]]:
+    """Contiguous [start, stop) quad ranges whose bbox sum fits budget."""
+    total = int(pixels.sum())
+    if total <= budget:
+        return [(0, len(pixels))]
+    cum = np.cumsum(pixels)
+    chunks: list[tuple[int, int]] = []
+    start = 0
+    while start < len(pixels):
+        consumed = int(cum[start - 1]) if start else 0
+        stop = int(np.searchsorted(cum, consumed + budget, side="right"))
+        if stop <= start:
+            stop = start + 1  # a single quad over budget paints alone
+        chunks.append((start, stop))
+        start = stop
+    return chunks
 
 
 def _rasterize(
@@ -192,13 +236,9 @@ def _rasterize(
     width: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Sample each quad's canvas-clipped bbox through the inverse basis."""
-    lo_c = np.maximum(np.floor(sx.min(axis=1)), 0.0)
-    hi_c = np.minimum(np.ceil(sx.max(axis=1)), float(width))
-    lo_r = np.maximum(np.floor(sy.min(axis=1)), 0.0)
-    hi_r = np.minimum(np.ceil(sy.max(axis=1)), float(height))
-    width_q = np.maximum((hi_c - lo_c).astype(np.int64), 0)
-    height_q = np.maximum((hi_r - lo_r).astype(np.int64), 0)
-    counts = width_q * height_q
+    counts, width_q, height_q, lo_c, lo_r = _bbox_pixels(
+        sx, sy, height, width
+    )
     total = int(counts.sum())
     if total == 0:
         empty = np.zeros(0, np.int64)
