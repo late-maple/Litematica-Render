@@ -4,6 +4,7 @@ import numpy as np
 
 __all__ = [
     "AO_LEVELS",
+    "CULL_NONE",
     "FACE_LIGHT",
     "QUAD_DTYPE",
     "TIER_DOWN",
@@ -24,8 +25,12 @@ QUAD_DTYPE = np.dtype(
         ("texkey", "U64"),
         ("shade", "u1"),
         ("dbl", "?"),
+        ("cull", "u1"),
     ]
 )
+
+# No cullface direction: the quad never disappears through neighbor culling.
+CULL_NONE = 255
 
 TIER_DOWN = 0
 TIER_UP = 1
@@ -68,6 +73,7 @@ def unit_cube_quads(texkey: str, shade_faces: bool = True) -> np.ndarray:
     else:
         quads["shade"] = np.full(6, TIER_UP, dtype=np.uint8)
     quads["dbl"] = False
+    quads["cull"] = CULL_NONE
     return quads
 
 

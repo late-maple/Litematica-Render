@@ -7,6 +7,7 @@ import numpy as np
 
 from litematic.render.pack.texture import _rotate
 from litematic.render.quads import (
+    CULL_NONE,
     QUAD_DTYPE,
     TIER_DOWN,
     TIER_EAST,
@@ -126,7 +127,7 @@ def _compile_elements(
     texkey_for: Callable[[dict[str, Any], dict[str, str], str], str | None],
 ) -> np.ndarray | None:
     """Compile model elements into world-space quads for one variant."""
-    rows: list[tuple[Any, Any, str, int, bool]] = []
+    rows: list[tuple[Any, Any, str, int, bool, int]] = []
     kx = (int(x_rot) // 90) % 4
     ky = (int(y_rot) // 90) % 4
     for element in elements:
@@ -171,14 +172,20 @@ def _compile_elements(
                     _rotate_element_point(corner, axis, angle, origin, factor)
                     for corner in corners
                 ]
+            cullface = face.get("cullface")
+            cull = (
+                _FACE_TIER[_rotate(str(cullface), x_rot, y_rot)]
+                if cullface in _VEC
+                else CULL_NONE
+            )
             rows.append(
-                (_rotate_corners(corners, kx, ky), uvs, texkey, shade, double)
+                (_rotate_corners(corners, kx, ky), uvs, texkey, shade, double, cull)
             )
     if not rows:
         return None
     quads = np.empty(len(rows), dtype=QUAD_DTYPE)
-    for index, (corners, uvs, texkey, shade, dbl) in enumerate(rows):
-        quads[index] = (corners, uvs, texkey, shade, dbl)
+    for index, (corners, uvs, texkey, shade, dbl, cull) in enumerate(rows):
+        quads[index] = (corners, uvs, texkey, shade, dbl, cull)
     keep = is_parallelogram(quads)
     if not keep.any():
         return None

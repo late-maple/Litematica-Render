@@ -9,7 +9,7 @@ from PIL import Image
 
 from litematic.render.pack.entities import chest_quads
 from litematic.render.pack.extract import _extract_pack
-from litematic.render.quads import QUAD_DTYPE, TIER_SOUTH
+from litematic.render.quads import CULL_NONE, QUAD_DTYPE, TIER_SOUTH
 
 
 def _solid_png(color, size=(64, 64)):
@@ -170,7 +170,7 @@ def test_extract_emits_chest_quads(tmp_path):
     assert summary.blocks == 2
     assert summary.skipped == 0
     data = _load_npz(dest)
-    assert data["meta/version"].item() == "pack-quads.4"
+    assert data["meta/version"].item() == "pack-quads.5"
     quads = data["quads/minecraft:chest[facing=north,type=single]"]
     assert len(quads) == 18
     assert set(str(k) for k in quads["texkey"]) == {"entity/chest/normal"}
@@ -225,3 +225,8 @@ def test_extract_without_entity_texture_leaves_chest_unresolved(tmp_path):
         key for key in data.files if key.startswith("quads/minecraft:chest")
     ]
     assert "tex/block/chest" in data.files
+
+
+def test_chest_quads_default_cull_none():
+    quads = chest_quads("minecraft:chest", "", _spy([]))
+    assert (quads["cull"] == CULL_NONE).all()

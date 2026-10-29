@@ -4,6 +4,7 @@ import numpy as np
 
 from litematic.render.quads import (
     AO_LEVELS,
+    CULL_NONE,
     FACE_LIGHT,
     QUAD_DTYPE,
     TIER_DOWN,
@@ -66,7 +67,7 @@ def test_tier_constants_match_vanilla_tables():
 
 
 def test_quad_dtype_fields():
-    assert QUAD_DTYPE.names == ("vtx", "uv", "texkey", "shade", "dbl")
+    assert QUAD_DTYPE.names == ("vtx", "uv", "texkey", "shade", "dbl", "cull")
     assert QUAD_DTYPE["vtx"].shape == (4, 3)
     assert QUAD_DTYPE["vtx"].base == np.dtype("f4")
     assert QUAD_DTYPE["uv"].shape == (4, 2)
@@ -74,7 +75,8 @@ def test_quad_dtype_fields():
     assert QUAD_DTYPE["texkey"] == np.dtype("U64")
     assert QUAD_DTYPE["shade"] == np.dtype("u1")
     assert QUAD_DTYPE["dbl"] == np.dtype("?")
-    assert QUAD_DTYPE.itemsize == 4 * 12 + 4 * 8 + 256 + 1 + 1
+    assert QUAD_DTYPE["cull"] == np.dtype("u1")
+    assert QUAD_DTYPE.itemsize == 4 * 12 + 4 * 8 + 256 + 1 + 1 + 1
 
 
 def test_unit_cube_quads_covers_six_tiers():
@@ -158,3 +160,18 @@ def test_parallelogram_empty_input():
     out = is_parallelogram(np.empty(0, dtype=QUAD_DTYPE))
     assert len(out) == 0
     assert out.dtype == np.dtype("?")
+
+
+# Cull metadata: every producer marks its quads with a cullface tier or
+# CULL_NONE; extraction resolves model JSON cullface through variant rotation.
+
+
+def test_cull_none_producers():
+    assert (unit_cube_quads("block/stone")["cull"] == CULL_NONE).all()
+    unshaded = unit_cube_quads("block/stone", shade_faces=False)
+    assert (unshaded["cull"] == CULL_NONE).all()
+
+
+def test_cull_dtype_field():
+    assert QUAD_DTYPE.names[-1] == "cull"
+    assert QUAD_DTYPE["cull"] == np.dtype("u1")

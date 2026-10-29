@@ -6,6 +6,7 @@ import numpy as np
 
 from litematic.render.errors import RenderError
 from litematic.render.quads import (
+    CULL_NONE,
     QUAD_DTYPE,
     TIER_EAST,
     TIER_NORTH,
@@ -206,6 +207,7 @@ def _cross(properties: Mapping[str, str]) -> np.ndarray:
     quads["texkey"] = ""
     quads["shade"] = TIER_UP
     quads["dbl"] = True
+    quads["cull"] = CULL_NONE
     return quads
 
 

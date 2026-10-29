@@ -4,6 +4,7 @@ import numpy as np
 
 from litematic.render.pack.blockstate import _state_pairs
 from litematic.render.quads import (
+    CULL_NONE,
     QUAD_DTYPE,
     TIER_DOWN,
     TIER_EAST,
@@ -84,6 +85,7 @@ def chest_quads(
             face_texkey,
             _TIER_OF_NORMAL[_rotate_normal(normal, degrees)],
             False,
+            CULL_NONE,
         )
     return quads
 

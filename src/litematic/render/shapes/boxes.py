@@ -5,6 +5,7 @@ from collections.abc import Mapping
 import numpy as np
 
 from litematic.render.quads import (
+    CULL_NONE,
     QUAD_DTYPE,
     TIER_DOWN,
     TIER_NORTH,
@@ -95,6 +96,7 @@ def box_quads(
         quads["shade"][tier] = tier
     quads["texkey"] = ""
     quads["dbl"] = False
+    quads["cull"] = CULL_NONE
     return quads
 
 

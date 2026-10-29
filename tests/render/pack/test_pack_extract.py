@@ -18,6 +18,7 @@ from litematic.render.pack.extract import (
 )
 from litematic.render.pack.texture import _resolve_ref
 from litematic.render.quads import (
+    CULL_NONE,
     QUAD_DTYPE,
     TIER_DOWN,
     TIER_EAST,
@@ -147,7 +148,7 @@ def test_plain_block_stateless_entry(tmp_path):
     assert summary.blocks == 1
     assert summary.skipped == 0
     data = _load_npz(dest)
-    assert data["meta/version"].item() == "pack-quads.4"
+    assert data["meta/version"].item() == "pack-quads.5"
     quads = data["quads/minecraft:stone[]"]
     assert quads.dtype == QUAD_DTYPE
     assert quads["texkey"].tolist() == ["block/stone"] * 6
@@ -904,7 +905,7 @@ def test_face_geom_matches_unit_cube_quads():
 
 def test_npz_v3_roundtrip(tmp_path):
     data = _load_npz(_extract(tmp_path, _stone_entries()))
-    assert data["meta/version"].item() == "pack-quads.4"
+    assert data["meta/version"].item() == "pack-quads.5"
     assert "quads/minecraft:stone[]" in data.files
     assert "occl/minecraft:stone[]" in data.files
     quads = data["quads/minecraft:stone[]"]
@@ -1711,3 +1712,55 @@ def test_budget_exhaustion_skips_later_textures(tmp_path, monkeypatch):
     assert "tex/block/b" in data.files
     assert "tex/block/stone" not in data.files
     assert "quads/minecraft:stone[]" not in data.files
+
+
+def test_cullface_mapped_through_variant_rotation(tmp_path):
+    faces = {
+        name: {"texture": "#all"}
+        for name in ("down", "up", "south", "west", "east")
+    }
+    faces["north"] = {"texture": "#all", "cullface": "north"}
+    entries = _stone_entries(
+        **{
+            "assets/minecraft/models/block/stone.json": json.dumps(
+                {
+                    "textures": {"all": "block/stone"},
+                    "elements": [
+                        {"from": [0, 0, 0], "to": [16, 16, 16], "faces": faces}
+                    ],
+                }
+            ),
+            "assets/minecraft/blockstates/rot.json": _blockstates(
+                "block/stone", y=180
+            ),
+        }
+    )
+    data = _load_npz(_extract(tmp_path, entries))
+    quads = data["quads/minecraft:rot[]"]
+    south = next(q for q in quads if int(q["shade"]) == TIER_SOUTH)
+    assert int(south["cull"]) == TIER_SOUTH  # y180 rotates the cullface
+    for tier, name in (
+        (TIER_DOWN, "block/stone"),
+        (TIER_UP, "block/stone"),
+        (TIER_EAST, "block/stone"),
+    ):
+        quad = next(q for q in quads if int(q["shade"]) == tier)
+        assert int(quad["cull"]) == CULL_NONE
+
+
+def test_missing_cullface_defaults_to_none(tmp_path):
+    data = _load_npz(_extract(tmp_path, _stone_entries()))
+    quads = data["quads/minecraft:stone[]"]
+    assert (quads["cull"] == CULL_NONE).all()
+
+
+def test_pack_quads4_cache_rebuilds(tmp_path):
+    pack_file = _make_pack(tmp_path / "pack.zip", _stone_entries())
+    dest = tmp_path / "out.npz"
+    _extract_pack(pack_file, dest)
+    data = dict(np.load(dest, allow_pickle=False))
+    data["meta/version"] = np.array("pack-quads.4")
+    cache = tmp_path / "pack.litematic-tex.npz"
+    np.savez(cache, **data)
+    textures = load_pack(pack_file)
+    assert textures.version == "pack-quads.5"
