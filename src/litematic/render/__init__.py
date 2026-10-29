@@ -6,14 +6,14 @@ import numpy as np
 
 from litematic.parse.model import Litematic
 from litematic.render.errors import RenderError
-from litematic.render.isometric import (
+from litematic.render.pack import load_pack
+from litematic.render.png import encode_png
+from litematic.render.scene.isometric import (
     _AIR_NAMES,
     _compose,
     _state_is_magenta,
 )
-from litematic.render.pack import load_pack
-from litematic.render.painter import _choose_scale, _downsample, _paint
-from litematic.render.png import encode_png
+from litematic.render.scene.painter import _choose_scale, _downsample, _paint
 
 __all__ = [
     "RenderError",

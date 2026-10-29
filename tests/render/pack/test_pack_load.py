@@ -9,9 +9,9 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from litematic.render import pack as pack_mod
 from litematic.render.errors import RenderError
 from litematic.render.pack import Textures, load_pack
+from litematic.render.pack import loader as pack_mod
 from litematic.render.quads import TIER_EAST, TIER_SOUTH, TIER_UP, unit_cube_quads
 
 
@@ -217,7 +217,7 @@ def test_corrupt_cache_member_auto_rebuilds(tmp_path):
 
 
 def test_unwritable_cache_falls_back_to_tempdir(tmp_path, monkeypatch):
-    from litematic.render import extract as extract_mod
+    from litematic.render.pack import extract as extract_mod
 
     pack_file = _mini_pack(tmp_path / "pack.zip")
     real = pack_mod._extract_pack
@@ -251,7 +251,7 @@ def test_vanished_pack_raises_render_error(tmp_path, monkeypatch):
 
 
 def test_two_arg_extract_produces_loadable_cache(tmp_path):
-    from litematic.render import extract as extract_mod
+    from litematic.render.pack import extract as extract_mod
 
     pack_file = _mini_pack(tmp_path / "pack.zip")
     dest = tmp_path / "out.npz"

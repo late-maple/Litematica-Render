@@ -3,8 +3,8 @@
 import numpy as np
 
 from litematic.render.errors import RenderError
-from litematic.render.isometric import _Scene
 from litematic.render.quads import FACE_LIGHT
+from litematic.render.scene.isometric import _Scene
 
 _CUTOUT_ALPHA = 16
 _COVER_ALPHA = 250

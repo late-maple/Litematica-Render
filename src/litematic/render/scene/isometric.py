@@ -6,8 +6,8 @@ import numpy as np
 
 from litematic.parse.model import Litematic
 from litematic.render.errors import RenderError
-from litematic.render.extract import _tint_for
 from litematic.render.pack import Textures
+from litematic.render.pack.texture import _tint_for
 from litematic.render.quads import (
     AO_LEVELS,
     TIER_DOWN,

@@ -1,5 +1,6 @@
 """Resource pack loading with an mtime-keyed extraction cache."""
 
+import json
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -7,15 +8,15 @@ from typing import NamedTuple
 
 import numpy as np
 
-from litematic.render.blockstate import _normalize_state_key
 from litematic.render.errors import RenderError
-from litematic.render.extract import (
+from litematic.render.pack.blockstate import _normalize_state_key, _when_matches
+from litematic.render.pack.extract import (
     _NPZ_VERSION,
     _CacheWriteError,
     _extract_pack,
 )
-from litematic.render.quads import QUAD_DTYPE
-from litematic.render.texture import _TEX_SIZE
+from litematic.render.pack.texture import _TEX_SIZE
+from litematic.render.quads import QUAD_DTYPE, redstone_tint
 
 __all__ = ["Textures", "load_pack"]
 
@@ -31,6 +32,8 @@ class Textures(NamedTuple):
     occl_map: dict[str, bool]
     pack_mtime: float
     states: dict[str, dict[str, dict[str, str]]] | None = None
+    parts_map: dict[str, str] = {}
+    mquad_map: dict[str, np.ndarray] = {}
 
     def quads(
         self, name: str, properties: Mapping[str, str]
@@ -40,7 +43,34 @@ class Textures(NamedTuple):
             entry = self.quads_map.get(f"{name}[{state_key}]")
             if entry is not None:
                 return entry
-        return None
+        record = self.parts_map.get(name)
+        if record is not None:
+            merged = self._evaluated_parts(name, record, properties)
+            if merged is not None:
+                return merged
+        return self.quads_map.get(f"{name}[]")
+
+    def _evaluated_parts(
+        self,
+        name: str,
+        record: str,
+        properties: Mapping[str, str],
+    ) -> np.ndarray | None:
+        """Concatenate the parts whose condition the live state satisfies."""
+        selected = [
+            self.mquad_map[part["quads"]]
+            for part in json.loads(record)["parts"]
+            if part["when"] is None
+            or _when_matches(part["when"], properties)
+        ]
+        if not selected:
+            return None
+        merged = (
+            np.concatenate(selected) if len(selected) > 1 else selected[0]
+        )
+        if name.partition(":")[2] == "redstone_wire":
+            merged = _power_tinted(merged, properties, self.arrays)
+        return merged
 
     def occludes(self, name: str, properties: Mapping[str, str]) -> bool:
         """Return the state's opaque-cube flag; missing entries are False."""
@@ -70,6 +100,27 @@ class Textures(NamedTuple):
             )
         ]
         return [key for _, key in sorted(found)]
+
+
+def _power_tinted(
+    quads: np.ndarray,
+    properties: Mapping[str, str],
+    arrays: dict[str, np.ndarray],
+) -> np.ndarray:
+    """Rewrite wire part texkeys to the live power's dust tint."""
+    try:
+        power = max(0, min(15, int(properties.get("power", "0"))))
+    except (TypeError, ValueError):
+        power = 0
+    r, g, b = redstone_tint(power)
+    out = quads.copy()
+    keys = []
+    for entry in out["texkey"]:
+        base = str(entry).partition("@")[0]
+        candidate = f"{base}@{r},{g},{b}"
+        keys.append(candidate if candidate in arrays else str(entry))
+    out["texkey"] = np.asarray(keys, dtype=QUAD_DTYPE["texkey"])
+    return out
 
 
 def _state_key_of(properties: Mapping[str, str]) -> str:
@@ -147,6 +198,8 @@ def _parse_textures(path: Path) -> Textures | None:
             arrays: dict[str, np.ndarray] = {}
             quads_map: dict[str, np.ndarray] = {}
             occl_map: dict[str, bool] = {}
+            parts_map: dict[str, str] = {}
+            mquad_map: dict[str, np.ndarray] = {}
             for key in data.files:
                 if key.startswith("tex/"):
                     array = data[key]
@@ -161,12 +214,30 @@ def _parse_textures(path: Path) -> Textures | None:
                     array = data[key]
                     if array.shape == () and array.dtype == np.uint8:
                         occl_map[key[len("occl/") :]] = bool(array.item())
+                elif key.startswith("parts/"):
+                    array = data[key]
+                    if array.shape == ():
+                        parts_map[key[len("parts/") :]] = str(array.item())
+                elif key.startswith("mquads/"):
+                    array = data[key]
+                    if array.ndim == 1 and array.dtype == QUAD_DTYPE:
+                        mquad_map[key[len("mquads/") :]] = array
         # A quads entry referencing an unknown tex array is unusable; drop
         # it so the render pipeline degrades to builtin shapes or magenta.
         quads_map = {
             key: value
             for key, value in quads_map.items()
             if {str(quad["texkey"]) for quad in value} <= arrays.keys()
+        }
+        mquad_map = {
+            key: value
+            for key, value in mquad_map.items()
+            if {str(quad["texkey"]) for quad in value} <= arrays.keys()
+        }
+        parts_map = {
+            key: record
+            for key, record in parts_map.items()
+            if _parts_usable(record, mquad_map)
         }
         return Textures(
             version=version,
@@ -175,6 +246,20 @@ def _parse_textures(path: Path) -> Textures | None:
             occl_map=occl_map,
             pack_mtime=pack_mtime,
             states=_state_index(quads_map, occl_map),
+            parts_map=parts_map,
+            mquad_map=mquad_map,
         )
     except Exception:
         return None
+
+
+def _parts_usable(record: str, mquad_map: dict[str, np.ndarray]) -> bool:
+    """A parts record is usable when every referenced quad array exists."""
+    try:
+        parts = json.loads(record)["parts"]
+        return all(
+            isinstance(part.get("quads"), str) and part["quads"] in mquad_map
+            for part in parts
+        )
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return False

@@ -14,7 +14,7 @@ from litematic.render.quads import (
     TIER_WEST,
     redstone_tint,
 )
-from litematic.render.shapes_boxes import (
+from litematic.render.shapes.boxes import (
     Box,
     _banner,
     _barrel,

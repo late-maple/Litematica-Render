@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from litematic.render.errors import RenderError
-from litematic.render.painter import _choose_scale, _downsample
+from litematic.render.scene.painter import _choose_scale, _downsample
 
 
 def test_choose_scale_picks_largest_fitting_t():

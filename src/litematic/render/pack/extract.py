@@ -8,18 +8,13 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from litematic.render.blockstate import _all_variants, _block_id
-from litematic.render.elements import (
+from litematic.render.errors import RenderError
+from litematic.render.pack.blockstate import _block_id, _parse_blockstate
+from litematic.render.pack.elements import (
     _compile_elements,
     _unit_cube_occl,
 )
-from litematic.render.errors import RenderError
-from litematic.render.quads import (
-    sort_quads,
-    unit_cube_quads,
-)
-from litematic.render.shapes import builtin_quads
-from litematic.render.texture import (
+from litematic.render.pack.texture import (
     _apply_tint,
     _cached_model,
     _load_texture,
@@ -29,6 +24,12 @@ from litematic.render.texture import (
     _texture_key,
     _tint_for,
 )
+from litematic.render.quads import (
+    redstone_tint,
+    sort_quads,
+    unit_cube_quads,
+)
+from litematic.render.shapes import builtin_quads
 
 
 class ExtractSummary(NamedTuple):
@@ -97,16 +98,19 @@ def _extract_pack(
         _require_pillow()
         texture_cache: dict[str, np.ndarray | None] = {}
         model_cache: dict[str, dict[str, Any] | None] = {}
+        mquad_cache: dict[str, str | None] = {}
         tex_arrays: dict[str, np.ndarray] = {}
         quad_map: dict[str, np.ndarray] = {}
         occl_map: dict[str, bool] = {}
+        parts_map: dict[str, str] = {}
+        mquad_map: dict[str, np.ndarray] = {}
         blocks = 0
         skipped = 0
         covered: set[str] = set()
         for state_name in state_files:
             block_id = _block_id(state_name)
             try:
-                states = _extract_block(
+                states, parts_json = _extract_block(
                     archive,
                     names,
                     state_name,
@@ -114,13 +118,15 @@ def _extract_pack(
                     model_cache,
                     texture_cache,
                     tex_arrays,
+                    mquad_cache,
+                    mquad_map,
                 )
             except RenderError:
                 raise
             except Exception:
                 skipped += 1
                 continue
-            if not states:
+            if not states and parts_json is None:
                 skipped += 1
                 continue
             covered.add(block_id)
@@ -128,6 +134,8 @@ def _extract_pack(
                 key = f"{block_id}[{state_key}]"
                 quad_map[key] = quads
                 occl_map[key] = occl
+            if parts_json is not None:
+                parts_map[f"parts/{block_id}"] = parts_json
             blocks += 1
         for ns, stem in _fallback_blocks(names):
             block_id = f"{ns}:{stem}"
@@ -159,7 +167,10 @@ def _extract_pack(
         }
         for ns in sorted(asset_ns):
             _register_wire_dust(archive, names, ns, texture_cache, tex_arrays)
-    _write_npz(Path(dest), tex_arrays, quad_map, occl_map, pack_mtime)
+    _write_npz(
+        Path(dest), tex_arrays, quad_map, occl_map, parts_map, mquad_map,
+        pack_mtime,
+    )
     return ExtractSummary(Path(dest), blocks, skipped)
 
 
@@ -214,10 +225,12 @@ def _extract_block(
     model_cache: dict[str, dict[str, Any] | None],
     texture_cache: dict[str, np.ndarray | None],
     tex_arrays: dict[str, np.ndarray],
-) -> dict[str, tuple[np.ndarray, bool]]:
-    """Extract compiled quads and occl flags for every variant of a state."""
+    mquad_cache: dict[str, str | None],
+    mquad_out: dict[str, np.ndarray],
+) -> tuple[dict[str, tuple[np.ndarray, bool]], str | None]:
+    """Extract variant quads plus the block's multipart part records."""
     state = json.loads(archive.read(state_name))
-    variants, model_refs = _all_variants(state, block_id)
+    variants, parts, model_refs = _parse_blockstate(state)
     ns = state_name.split("/")[1]
     result: dict[str, tuple[np.ndarray, bool]] = {}
     for state_key, applies in variants:
@@ -248,15 +261,148 @@ def _extract_block(
         if len(merged) > _QUAD_FUSE:
             continue
         result[state_key] = (merged, _unit_cube_occl(merged, tex_arrays))
-    if not result:
-        # No pack geometry (conditional multipart, missing models): resolve
+    parts_json = _extract_parts(
+        archive,
+        names,
+        ns,
+        block_id,
+        parts,
+        model_cache,
+        texture_cache,
+        tex_arrays,
+        mquad_cache,
+        mquad_out,
+    )
+    if not result and parts_json is None:
+        # No pack geometry (missing models, builtin-cut chains): resolve
         # the builtin layer's texture per spec 5.3 so compose's state-aware
         # builtin step can backfill it under the canonical block key.
         _register_builtin_texture(
             archive, names, ns, block_id, model_refs, model_cache,
             texture_cache, tex_arrays,
         )
-    return result
+    return result, parts_json
+
+
+def _extract_parts(
+    archive: zipfile.ZipFile,
+    names: set[str],
+    ns: str,
+    block_id: str,
+    parts: list[dict[str, Any]] | None,
+    model_cache: dict[str, dict[str, Any] | None],
+    texture_cache: dict[str, np.ndarray | None],
+    tex_arrays: dict[str, np.ndarray],
+    mquad_cache: dict[str, str | None],
+    mquad_out: dict[str, np.ndarray],
+) -> str | None:
+    """Compile multipart part records into lazily evaluated npz entries.
+
+    Each part's geometry compiles once per (model, rotation) and the raw
+    condition tree ships alongside it; render-time evaluation against the
+    live properties replaces key enumeration entirely.
+    """
+    if parts is None:
+        return None
+    records: list[dict[str, Any]] = []
+    for part in parts:
+        subkey = _model_quads_key(
+            archive,
+            names,
+            ns,
+            part["model"],
+            part["x"],
+            part["y"],
+            block_id,
+            model_cache,
+            texture_cache,
+            tex_arrays,
+            mquad_cache,
+            mquad_out,
+        )
+        if subkey is not None:
+            records.append({"when": part["when"], "quads": subkey})
+    if not records:
+        return None
+    if block_id.partition(":")[2] == "redstone_wire":
+        # Part quads ship untinted (the dust tint depends on the live
+        # power); register every power variant of their textures so the
+        # lookup-side texkey rewrite always finds the tinted array.
+        bases = {
+            str(key).partition("@")[0]
+            for subkey in (r["quads"] for r in records)
+            for key in mquad_out[subkey]["texkey"]
+        }
+        for base in sorted(bases):
+            raw = tex_arrays.get(base)
+            if raw is None:
+                continue
+            for power in range(16):
+                tint = redstone_tint(power)
+                tex_arrays.setdefault(
+                    f"{base}@{tint[0]},{tint[1]},{tint[2]}",
+                    _apply_tint(raw, tint),
+                )
+    return json.dumps({"parts": records})
+
+
+def _model_quads_key(
+    archive: zipfile.ZipFile,
+    names: set[str],
+    ns: str,
+    ref: str,
+    x_rot: int,
+    y_rot: int,
+    block_id: str,
+    model_cache: dict[str, dict[str, Any] | None],
+    texture_cache: dict[str, np.ndarray | None],
+    tex_arrays: dict[str, np.ndarray],
+    mquad_cache: dict[str, str | None],
+    mquad_out: dict[str, np.ndarray],
+) -> str | None:
+    """Compile one part model's quads once, keyed by (ns, ref, rotation)."""
+    cache_key = f"{ns}|{ref}|x{x_rot}|y{y_rot}"
+    if cache_key in mquad_cache:
+        return mquad_cache[cache_key]
+    subkey = cache_key
+    model = _cached_model(archive, names, ns, ref, model_cache)
+    quads: np.ndarray | None = None
+    if model is not None and not model.get("builtin_cut"):
+        if model["elements"] is not None:
+
+            def texkey_for(
+                face: dict[str, Any], textures: dict[str, str], face_ns: str
+            ) -> str | None:
+                return _element_texkey(
+                    archive,
+                    names,
+                    face_ns,
+                    face,
+                    textures,
+                    block_id,
+                    "",
+                    texture_cache,
+                    tex_arrays,
+                )
+
+            quads = _compile_elements(
+                model["elements"],
+                model["textures"],
+                ns,
+                x_rot,
+                y_rot,
+                texkey_for,
+            )
+        else:
+            quads = _stub_quads(
+                archive, names, ns, model, block_id, "", texture_cache, tex_arrays
+            )
+    if quads is None or not len(quads):
+        mquad_cache[cache_key] = None
+        return None
+    mquad_out[subkey] = sort_quads(quads)
+    mquad_cache[cache_key] = subkey
+    return subkey
 
 
 
@@ -403,6 +549,8 @@ def _write_npz(
     tex_arrays: dict[str, np.ndarray],
     quad_map: dict[str, np.ndarray],
     occl_map: dict[str, bool],
+    parts_map: dict[str, str],
+    mquad_map: dict[str, np.ndarray],
     pack_mtime: float,
 ) -> None:
     entries: dict[str, np.ndarray] = {
@@ -415,6 +563,10 @@ def _write_npz(
         entries[f"quads/{key}"] = sort_quads(quads)
     for key, occl in occl_map.items():
         entries[f"occl/{key}"] = np.array(occl, dtype=np.uint8)
+    for key, record in parts_map.items():
+        entries[key] = np.array(record)
+    for key, quads in mquad_map.items():
+        entries[f"mquads/{key}"] = sort_quads(quads)
     try:
         out = zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED)
     except OSError as exc:

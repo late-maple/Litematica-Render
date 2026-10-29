@@ -213,6 +213,11 @@ def _tint_for(block_id: str, state_key: str) -> tuple[int, int, int] | None:
     if path == "water" or path == "bubble_column":
         return _TINTS["water"]
     if path == "redstone_wire":
+        # An empty state key marks the multipart part path: the dust tint
+        # depends on the live power, so the base texture ships untinted
+        # and pack.py rewrites the texkeys at lookup time.
+        if not state_key:
+            return None
         return _redstone_tint(state_key)
     if "leaves" in path or path == "vine":
         return _TINTS["foliage"]

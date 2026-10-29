@@ -5,6 +5,7 @@ from typing import Any, Callable, cast
 
 import numpy as np
 
+from litematic.render.pack.texture import _rotate
 from litematic.render.quads import (
     QUAD_DTYPE,
     TIER_DOWN,
@@ -15,7 +16,6 @@ from litematic.render.quads import (
     TIER_WEST,
     is_parallelogram,
 )
-from litematic.render.texture import _rotate
 
 _OPAQUE_ALPHA = 250.0
 

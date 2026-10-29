@@ -6,10 +6,10 @@ from helpers.litematica_packer import build_litematic_bytes
 
 from litematic import loads
 from litematic.render.errors import RenderError
-from litematic.render.isometric import _compose
 from litematic.render.pack import Textures
-from litematic.render.painter import _paint
 from litematic.render.quads import QUAD_DTYPE, TIER_SOUTH, unit_cube_quads
+from litematic.render.scene.isometric import _compose
+from litematic.render.scene.painter import _paint
 
 _BG = (0, 0, 0, 0)
 _STONE = (200, 30, 30, 255)

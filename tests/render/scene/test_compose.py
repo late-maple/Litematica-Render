@@ -7,11 +7,6 @@ import numpy as np
 from helpers.litematica_packer import build_litematic_bytes
 
 from litematic import loads
-from litematic.render.isometric import (
-    _MAGENTA_TEXKEY,
-    _backfill_builtin,
-    _compose,
-)
 from litematic.render.pack import Textures, load_pack
 from litematic.render.quads import (
     QUAD_DTYPE,
@@ -19,6 +14,11 @@ from litematic.render.quads import (
     TIER_SOUTH,
     TIER_UP,
     unit_cube_quads,
+)
+from litematic.render.scene.isometric import (
+    _MAGENTA_TEXKEY,
+    _backfill_builtin,
+    _compose,
 )
 from litematic.render.shapes import builtin_quads
 
