@@ -5,7 +5,15 @@ from collections.abc import Callable, Mapping
 import numpy as np
 
 from litematic.render.errors import RenderError
-from litematic.render.quads import QUAD_DTYPE, TIER_UP
+from litematic.render.quads import (
+    QUAD_DTYPE,
+    TIER_EAST,
+    TIER_NORTH,
+    TIER_SOUTH,
+    TIER_UP,
+    TIER_WEST,
+    redstone_tint,
+)
 from litematic.render.shapes_boxes import (
     Box,
     _banner,
@@ -15,6 +23,7 @@ from litematic.render.shapes_boxes import (
     _carpet,
     _chest,
     _combine,
+    _composter,
     _conduit,
     _door,
     _facing,
@@ -240,6 +249,59 @@ def _is_cross(stem: str) -> bool:
     return stem in _CROSS_PLANTS or stem.endswith(("_sapling", "_propagule"))
 
 
+def _ground_plane(transposed: bool, texkey: str) -> np.ndarray:
+    """One full-width dust plane on the block floor; transposed uv runs E-W."""
+    quad = box_quads(0, 0, 0, 16, 0, 16)[[TIER_UP]].copy()
+    if transposed:
+        quad["uv"][0] = quad["vtx"][0][:, [2, 0]]
+    quad["texkey"][0] = texkey
+    return quad
+
+
+def _wall_strip(tier: int, texkey: str) -> np.ndarray:
+    """One full-height dust strip on a block face, visible from both sides."""
+    bounds = {
+        TIER_NORTH: (0, 0, 0, 16, 16, 0),
+        TIER_SOUTH: (0, 0, 16, 16, 16, 16),
+        TIER_WEST: (0, 0, 0, 0, 16, 16),
+        TIER_EAST: (16, 0, 0, 16, 16, 16),
+    }[tier]
+    quad = box_quads(*bounds)[[tier]].copy()
+    quad["texkey"][0] = texkey
+    quad["dbl"][0] = True
+    quad["shade"][0] = TIER_UP
+    return quad
+
+
+def _wire(properties: Mapping[str, str]) -> np.ndarray:
+    """Redstone dust: ground planes per connected axis, wall strips for up."""
+    try:
+        power = max(0, min(15, int(properties.get("power", "0"))))
+    except (TypeError, ValueError):
+        power = 0
+    r, g, b = redstone_tint(power)
+    line = f"block/redstone_dust_line0@{r},{g},{b}"
+    dot = f"block/redstone_dust_dot@{r},{g},{b}"
+    connected = [
+        properties.get(direction, "none") in ("side", "up")
+        for direction in _SIDES
+    ]
+    quads: list[np.ndarray] = []
+    if not any(connected):
+        quads.append(_ground_plane(False, dot))
+    else:
+        # North-south planes sample the texture column along x; east-west
+        # planes transpose the uv so the same column runs along z.
+        if connected[0] or connected[1]:
+            quads.append(_ground_plane(False, line))
+        if connected[2] or connected[3]:
+            quads.append(_ground_plane(True, line))
+    for direction, tier in zip(_SIDES, (TIER_NORTH, TIER_SOUTH, TIER_WEST, TIER_EAST)):
+        if properties.get(direction, "none") == "up":
+            quads.append(_wall_strip(tier, line))
+    return np.concatenate(quads)
+
+
 # Ordered dispatch, earlier rows win: wall torches must precede standing
 # torches because "*_wall_torch" also ends with "_torch". The other rows
 # are pairwise disjoint and keep Blockscope's precedence for reference.
@@ -251,6 +313,8 @@ _FAMILIES: tuple[tuple[Callable[[str], bool], Builder], ...] = (
     (_is_cross, _cross),
     (_named("water", "lava", "bubble_column"), _fluid),
     (_named("snow"), _snow),
+    (_named("redstone_wire"), _wire),
+    (_named("composter"), _composter),
     (_suffixed("_slab"), _slab),
     (_suffixed("_stairs"), _stairs),
     (_suffixed("_carpet"), _carpet),

@@ -7,7 +7,11 @@ import numpy as np
 from helpers.litematica_packer import build_litematic_bytes
 
 from litematic import loads
-from litematic.render.isometric import _MAGENTA_TEXKEY, _compose
+from litematic.render.isometric import (
+    _MAGENTA_TEXKEY,
+    _backfill_builtin,
+    _compose,
+)
 from litematic.render.pack import Textures, load_pack
 from litematic.render.quads import (
     QUAD_DTYPE,
@@ -16,6 +20,7 @@ from litematic.render.quads import (
     TIER_UP,
     unit_cube_quads,
 )
+from litematic.render.shapes import builtin_quads
 
 _STONE = (140, 140, 140, 255)
 
@@ -425,9 +430,9 @@ def test_real_pack_fence_connection_geometry(tmp_path):
         0,
         textures,
     )
-    assert len(alone.quad_shade) == 3  # post only
-    # Two rails per connected side: post + 2x2 arm boxes, 3 faces each.
-    assert len(linked.quad_shade) == 15
+    assert len(alone.quad_shade) == 2  # post model, camera-facing sides
+    # north=true key merges the post and side models.
+    assert len(linked.quad_shade) == 6  # post + north side + east side
     assert _MAGENTA_TEXKEY not in alone.texkeys
     assert _MAGENTA_TEXKEY not in linked.texkeys
 
@@ -572,3 +577,21 @@ def test_model_less_missing_material_stays_magenta(tmp_path):
         textures,
     )
     assert _MAGENTA_TEXKEY in scene.texkeys
+
+
+def test_backfill_keeps_wire_power_texkeys():
+    built = builtin_quads("minecraft:redstone_wire", {"power": "8"})
+    arrays = {str(k): np.zeros((16, 16, 4), np.uint8) for k in built["texkey"]}
+    assert _backfill_builtin("minecraft:redstone_wire", built, arrays)
+    assert built["texkey"][0] == "block/redstone_dust_dot@171,14,14"
+    assert not _backfill_builtin("minecraft:redstone_wire", built, {})
+
+
+def test_backfill_pane_prefers_pane_top_texture():
+    built = builtin_quads("minecraft:black_stained_glass_pane", {})
+    arrays = {
+        "block/black_stained_glass_pane_top": np.zeros((16, 16, 4), np.uint8),
+        "block/black_stained_glass": np.zeros((16, 16, 4), np.uint8),
+    }
+    assert _backfill_builtin("minecraft:black_stained_glass_pane", built, arrays)
+    assert (built["texkey"] == "block/black_stained_glass_pane_top").all()

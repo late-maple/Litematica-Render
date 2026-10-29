@@ -59,7 +59,7 @@ def test_first_load_extracts_and_caches(tmp_path):
     pack_file = _mini_pack(tmp_path / "pack.zip")
     textures = load_pack(pack_file)
     assert isinstance(textures, Textures)
-    assert textures.version == "pack-quads"
+    assert textures.version == "pack-quads.1"
     assert (tmp_path / "pack.litematic-tex.npz").is_file()
     quads = textures.quads("minecraft:stone", {})
     assert quads is not None
@@ -258,7 +258,7 @@ def test_two_arg_extract_produces_loadable_cache(tmp_path):
     extract_mod._extract_pack(pack_file, dest)
     parsed = pack_mod._parse_textures(dest)
     assert parsed is not None
-    assert parsed.version == "pack-quads"
+    assert parsed.version == "pack-quads.1"
 
 
 def test_old_cache_version_rebuilds(tmp_path):
@@ -275,7 +275,7 @@ def test_old_cache_version_rebuilds(tmp_path):
     finally:
         pack_mod._extract_pack = counter.real
     assert counter.calls == 1
-    assert textures.version == "pack-quads"
+    assert textures.version == "pack-quads.1"
     assert textures.quads("minecraft:stone", {}) is not None
 
 

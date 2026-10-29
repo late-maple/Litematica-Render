@@ -8,14 +8,9 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from litematic.render.elements import _FACE_GEOM, _compile_elements
 from litematic.render.errors import RenderError
-from litematic.render.extract import (
-    _FACE_GEOM,
-    ExtractSummary,
-    _compile_elements,
-    _extract_pack,
-    _resolve_ref,
-)
+from litematic.render.extract import ExtractSummary, _extract_pack
 from litematic.render.quads import (
     QUAD_DTYPE,
     TIER_DOWN,
@@ -27,6 +22,7 @@ from litematic.render.quads import (
     sort_quads,
     unit_cube_quads,
 )
+from litematic.render.texture import _resolve_ref
 
 
 def _solid_png(color, size=(16, 16)):
@@ -146,7 +142,7 @@ def test_plain_block_stateless_entry(tmp_path):
     assert summary.blocks == 1
     assert summary.skipped == 0
     data = _load_npz(dest)
-    assert data["meta/version"].item() == "pack-quads"
+    assert data["meta/version"].item() == "pack-quads.1"
     quads = data["quads/minecraft:stone[]"]
     assert quads.dtype == QUAD_DTYPE
     assert quads["texkey"].tolist() == ["block/stone"] * 6
@@ -844,7 +840,7 @@ def test_face_geom_matches_unit_cube_quads():
 
 def test_npz_v3_roundtrip(tmp_path):
     data = _load_npz(_extract(tmp_path, _stone_entries()))
-    assert data["meta/version"].item() == "pack-quads"
+    assert data["meta/version"].item() == "pack-quads.1"
     assert "quads/minecraft:stone[]" in data.files
     assert "occl/minecraft:stone[]" in data.files
     quads = data["quads/minecraft:stone[]"]
@@ -1263,32 +1259,38 @@ def _multipart_entries(multipart):
     }
 
 
-def test_multipart_conditional_parts_defer_to_builtin(tmp_path):
-    # Escalation ruling: conditional multiparts emit no quads at all (not
-    # even the unconditional part) so builtin connection geometry shows
-    # through; the state counts as skipped.
+def test_multipart_conditional_parts_merge_per_state(tmp_path):
+    # When-merge contract: the state enumerates over the conditions'
+    # domain (boolean properties pair true with false), each key holding
+    # the applies of every part whose condition that assignment satisfies.
     entries = _multipart_entries(
         [
             {"apply": {"model": "block/post"}},
             {"when": {"north": "true"}, "apply": {"model": "block/arm"}},
         ]
     )
-    dest = tmp_path / "out.npz"
-    summary = _extract_pack(
-        _make_pack(tmp_path / "pack.zip", entries), dest
+    data = _load_npz(_extract(tmp_path, entries))
+    keys = sorted(
+        k for k in data.files if k.startswith("quads/minecraft:gate[")
     )
-    assert summary.skipped == 1
-    data = _load_npz(dest)
-    assert not [k for k in data.files if k.startswith("quads/minecraft:gate[")]
-    assert not [k for k in data.files if k.startswith("occl/minecraft:gate[")]
+    assert keys == [
+        "quads/minecraft:gate[north=false]",
+        "quads/minecraft:gate[north=true]",
+    ]
+    quads = data["quads/minecraft:gate[north=false]"]
+    assert sorted(str(k) for k in quads["texkey"]) == ["block/post"]
+    assert sorted(
+        str(k) for k in data["quads/minecraft:gate[north=true]"]["texkey"]
+    ) == ["block/arm", "block/post"]
 
 
-def test_multipart_first_part_conditional_no_pack_quads(tmp_path):
+def test_multipart_all_conditional_still_enumerates(tmp_path):
     entries = _multipart_entries(
         [{"when": {"north": "true"}, "apply": {"model": "block/arm"}}]
     )
     data = _load_npz(_extract(tmp_path, entries))
-    assert not [k for k in data.files if k.startswith("quads/minecraft:gate[")]
+    quads = data["quads/minecraft:gate[north=true]"]
+    assert sorted(str(k) for k in quads["texkey"]) == ["block/arm"]
 
 
 def test_multipart_unconditional_parts_union(tmp_path):
@@ -1367,7 +1369,7 @@ def _fence_pack_entries(**extra):
     return entries
 
 
-def test_vanilla_fence_defers_geometry_and_rekeys_model_texture(tmp_path):
+def test_vanilla_fence_geometry_comes_from_multipart_merge(tmp_path):
     entries = _fence_pack_entries(
         **{
             "assets/minecraft/textures/block/oak_fence.png": _solid_png(
@@ -1378,18 +1380,26 @@ def test_vanilla_fence_defers_geometry_and_rekeys_model_texture(tmp_path):
     dest = tmp_path / "out.npz"
     summary = _extract_pack(_make_pack(tmp_path / "pack.zip", entries), dest)
     data = _load_npz(dest)
-    assert summary.skipped == 1
-    assert not [k for k in data.files if k.startswith("quads/minecraft:oak_fence[")]
-    # Spec 5.3 level 1: the model's own planks texture wins over the
-    # same-name file and is registered under the canonical block key.
-    assert (_tex(data, "block/oak_fence") == (168, 90, 50, 255)).all()
+    assert summary.skipped == 0
+    keys = sorted(
+        k for k in data.files if k.startswith("quads/minecraft:oak_fence[")
+    )
+    assert keys == [
+        "quads/minecraft:oak_fence[north=false]",
+        "quads/minecraft:oak_fence[north=true]",
+    ]
+    # The model's own planks texture resolves inline; the same-name file
+    # never participates.
+    assert sorted(
+        str(k) for k in data["quads/minecraft:oak_fence[north=true]"]["texkey"]
+    ) == ["block/oak_planks"] * 2
 
 
 def test_vanilla_fence_without_same_name_texture_still_resolves(tmp_path):
     entries = _fence_pack_entries()
     data = _load_npz(_extract(tmp_path, entries))
-    assert not [k for k in data.files if k.startswith("quads/minecraft:oak_fence[")]
-    assert (_tex(data, "block/oak_fence") == (168, 90, 50, 255)).all()
+    quads = data["quads/minecraft:oak_fence[north=false]"]
+    assert sorted(str(k) for k in quads["texkey"]) == ["block/oak_planks"]
 
 
 def test_broken_model_family_keeps_same_name_texture(tmp_path):
@@ -1430,3 +1440,96 @@ def test_texture_fallback_family_registers_texture_without_quads(tmp_path):
     # v1 dedup: tinted blocks register only the @tint array key.
     tinted = _tex(data, "block/short_grass@145,189,89")
     assert (tinted == (55, 117, 23, 255)).all()
+
+
+def test_wire_dust_textures_registered_with_power_tints(tmp_path):
+    entries = {
+        "assets/minecraft/textures/block/redstone_dust_dot.png": _solid_png(
+            (220, 220, 220, 255)
+        ),
+        "assets/minecraft/textures/block/redstone_dust_line0.png": _solid_png(
+            (220, 220, 220, 255)
+        ),
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    for key in (
+        "block/redstone_dust_dot@76,0,0",
+        "block/redstone_dust_dot@255,26,26",
+        "block/redstone_dust_line0@171,14,14",
+    ):
+        assert f"tex/{key}" in data.files
+    assert tuple(data["tex/block/redstone_dust_dot@255,26,26"][0, 0]) == (
+        220,
+        22,
+        22,
+        255,
+    )
+
+
+def test_multipart_when_conditions_merge_per_state(tmp_path):
+    entries = {
+        "assets/minecraft/blockstates/post.json": json.dumps(
+            {
+                "multipart": [
+                    {"apply": {"model": "block/post"}},
+                    {"apply": {"model": "block/arm"}, "when": {"north": "true"}},
+                    {
+                        "apply": {"model": "block/up"},
+                        "when": {"OR": [{"east": "side"}, {"east": "up"}]},
+                    },
+                ]
+            }
+        ),
+        "assets/minecraft/models/block/post.json": _model(_all_faces("block/post")),
+        "assets/minecraft/models/block/arm.json": _model(_all_faces("block/arm")),
+        "assets/minecraft/models/block/up.json": _model(_all_faces("block/up")),
+        "assets/minecraft/textures/block/post.png": _solid_png((9, 9, 9, 255)),
+        "assets/minecraft/textures/block/arm.png": _solid_png((8, 8, 8, 255)),
+        "assets/minecraft/textures/block/up.png": _solid_png((7, 7, 7, 255)),
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    keys = sorted(
+        k for k in data.files if k.startswith("quads/minecraft:post[")
+    )
+    assert len(keys) == 6
+    assert len(data["quads/minecraft:post[east=none,north=true]"]) == 12
+    assert len(data["quads/minecraft:post[east=up,north=false]"]) == 12
+    assert len(data["quads/minecraft:post[east=none,north=false]"]) == 6
+
+
+def test_wire_multipart_enumerates_power_for_tint(tmp_path):
+    wire_state = json.dumps(
+        {
+            "multipart": [
+                {"apply": {"model": "block/wire"}},
+                {
+                    "apply": {"model": "block/wire_up"},
+                    "when": {"north": "side|up"},
+                },
+            ]
+        }
+    )
+    wire_model = json.dumps(
+        {
+            "elements": [
+                {
+                    "from": [0, 0, 0],
+                    "to": [16, 0, 16],
+                    "faces": {"up": {"texture": "block/wire", "tintindex": 0}},
+                }
+            ]
+        }
+    )
+    entries = {
+        "assets/minecraft/blockstates/redstone_wire.json": wire_state,
+        "assets/minecraft/models/block/wire.json": wire_model,
+        "assets/minecraft/models/block/wire_up.json": wire_model,
+        "assets/minecraft/textures/block/wire.png": _solid_png(
+            (220, 220, 220, 255)
+        ),
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    keys = [k for k in data.files if k.startswith("quads/minecraft:redstone_wire[")]
+    assert len(keys) == 48
+    q = data["quads/minecraft:redstone_wire[north=side,power=8]"]
+    assert q["texkey"][0] == "block/wire@171,14,14"

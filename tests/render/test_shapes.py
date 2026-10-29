@@ -447,3 +447,46 @@ def test_multi_box_families_stay_parallelograms():
     plant = builtin_quads("poppy", {})
     for quads in (stairs, lectern, fence, gate, wall, pane, plant):
         assert is_parallelogram(quads).all()
+
+
+def test_redstone_wire_unconnected_is_single_dot_plane():
+    q = builtin_quads("minecraft:redstone_wire", {"power": "0"})
+    assert len(q) == 1
+    assert q["shade"][0] == TIER_UP
+    assert not q["dbl"][0]
+    assert q["texkey"][0] == "block/redstone_dust_dot@76,0,0"
+    assert q["vtx"][0][:, 1].min() == 0.0
+    assert q["vtx"][0][:, 1].max() == 0.0
+
+
+def test_redstone_wire_arms_uv_orientation_and_power_tint():
+    q = builtin_quads(
+        "minecraft:redstone_wire",
+        {"north": "side", "east": "up", "power": "15"},
+    )
+    assert len(q) == 3
+    assert set(q["texkey"]) == {"block/redstone_dust_line0@255,26,26"}
+    ground = q[~q["dbl"]]
+    assert len(ground) == 2
+    # North-south planes sample the line column along x; east-west planes
+    # transpose the uv so the same texture runs along z.
+    assert any(bool(np.allclose(g["uv"][:, 0], g["vtx"][:, 0])) for g in ground)
+    assert any(bool(np.allclose(g["uv"][:, 0], g["vtx"][:, 2])) for g in ground)
+    strip = q[q["dbl"]]
+    assert len(strip) == 1
+    assert strip["vtx"][0][:, 0].min() == 16.0
+    assert strip["vtx"][0][:, 0].max() == 16.0
+    assert strip["vtx"][0][:, 1].min() == 0.0
+    assert strip["vtx"][0][:, 1].max() == 16.0
+
+
+def test_redstone_wire_malformed_power_falls_to_zero():
+    q = builtin_quads("minecraft:redstone_wire", {"power": "x"})
+    assert q["texkey"][0] == "block/redstone_dust_dot@76,0,0"
+
+
+def test_composter_is_inset_box():
+    q = builtin_quads("minecraft:composter", {"level": "3"})
+    assert len(q) == 6
+    assert q["vtx"][..., 0].min() == 1.0
+    assert q["vtx"][..., 0].max() == 15.0

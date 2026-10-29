@@ -7,15 +7,15 @@ from typing import NamedTuple
 
 import numpy as np
 
+from litematic.render.blockstate import _normalize_state_key
 from litematic.render.errors import RenderError
 from litematic.render.extract import (
     _NPZ_VERSION,
-    _TEX_SIZE,
     _CacheWriteError,
     _extract_pack,
-    _normalize_state_key,
 )
 from litematic.render.quads import QUAD_DTYPE
+from litematic.render.texture import _TEX_SIZE
 
 __all__ = ["Textures", "load_pack"]
 

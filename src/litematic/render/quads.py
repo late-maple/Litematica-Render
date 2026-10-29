@@ -84,3 +84,17 @@ def is_parallelogram(quads: np.ndarray, eps: float = 1e-3) -> np.ndarray:
     vtx = quads["vtx"]
     diag = (vtx[:, 0] + vtx[:, 2]) - (vtx[:, 1] + vtx[:, 3])
     return np.all(np.abs(diag) <= eps, axis=-1)
+
+_REDSTONE_LOW = (76, 0, 0)
+_REDSTONE_HIGH = (255, 26, 26)
+
+
+def redstone_tint(power: int) -> tuple[int, int, int]:
+    """Vanilla dust color for a redstone power level, 0-15."""
+    factor = max(0, min(15, power)) / 15.0
+    low, high = _REDSTONE_LOW, _REDSTONE_HIGH
+    return (
+        round(low[0] + (high[0] - low[0]) * factor),
+        round(low[1] + (high[1] - low[1]) * factor),
+        round(low[2] + (high[2] - low[2]) * factor),
+    )

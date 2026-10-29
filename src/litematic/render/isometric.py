@@ -319,10 +319,14 @@ def _backfill_builtin(
 ) -> bool:
     """Fill builtin quads' texkeys from direct, then material, keys.
 
-    Direct matches (same-name plus tint variant, extraction-registered)
-    always win; the vanilla naming conventions fire only when no direct
-    texture exists, and unresolved families fall through to magenta.
+    Builders may emit final per-quad texkeys (wire power tints); those
+    pass through when every key resolves in the arrays. Direct matches
+    (same-name plus tint variant, extraction-registered) always win; the
+    vanilla naming conventions fire only when no direct texture exists,
+    and unresolved families fall through to magenta.
     """
+    if np.all(quads["texkey"] != ""):
+        return all(str(key) in arrays for key in quads["texkey"])
     ns, _, stem = name.partition(":")
     prefix = "" if ns in ("", "minecraft") else f"{ns}:"
     base = f"{prefix}block/{stem or name}"
@@ -360,6 +364,15 @@ def _door_texkeys(prefix: str, stem: str) -> tuple[str, str] | None:
 
 def _material_keys(prefix: str, stem: str) -> tuple[str, ...]:
     """Ordered base-material texture keys per vanilla naming rules."""
+    if stem.endswith("_pane"):
+        # Vanilla pane models texture from <stem>_top; the bare glass is
+        # the second chance.
+        material = stem[: -len("_pane")]
+        return (
+            f"{prefix}block/{stem}_top",
+            f"{prefix}block/{material}",
+            f"{prefix}block/{material}s",
+        )
     for suffix in _FAMILY_SUFFIXES:
         if stem.endswith(suffix):
             material = stem[: -len(suffix)]
