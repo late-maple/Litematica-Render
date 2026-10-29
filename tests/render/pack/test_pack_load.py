@@ -59,7 +59,7 @@ def test_first_load_extracts_and_caches(tmp_path):
     pack_file = _mini_pack(tmp_path / "pack.zip")
     textures = load_pack(pack_file)
     assert isinstance(textures, Textures)
-    assert textures.version == "pack-quads.1"
+    assert textures.version == "pack-quads.2"
     assert (tmp_path / "pack.litematic-tex.npz").is_file()
     quads = textures.quads("minecraft:stone", {})
     assert quads is not None
@@ -258,7 +258,7 @@ def test_two_arg_extract_produces_loadable_cache(tmp_path):
     extract_mod._extract_pack(pack_file, dest)
     parsed = pack_mod._parse_textures(dest)
     assert parsed is not None
-    assert parsed.version == "pack-quads.1"
+    assert parsed.version == "pack-quads.2"
 
 
 def test_old_cache_version_rebuilds(tmp_path):
@@ -275,7 +275,7 @@ def test_old_cache_version_rebuilds(tmp_path):
     finally:
         pack_mod._extract_pack = counter.real
     assert counter.calls == 1
-    assert textures.version == "pack-quads.1"
+    assert textures.version == "pack-quads.2"
     assert textures.quads("minecraft:stone", {}) is not None
 
 
@@ -419,3 +419,31 @@ def test_occludes_match_ignores_extra_state_properties(tmp_path):
     assert textures.occludes(
         "minecraft:thing", {"facing": "north", "waterlogged": "false"}
     )
+
+
+def test_multipart_malformed_when_matches_nothing(tmp_path):
+    faces = {n: {"texture": "block/tex"} for n in _FACE_NAMES}
+    entries = {
+        "assets/minecraft/blockstates/thing.json": json.dumps(
+            {
+                "multipart": [
+                    {
+                        "when": {"OR": ["facing=north"]},
+                        "apply": {"model": "block/bad"},
+                    },
+                    {"apply": {"model": "block/plain"}},
+                ]
+            }
+        ),
+        "assets/minecraft/models/block/bad.json": json.dumps(
+            {"elements": [{"from": [0] * 3, "to": [16] * 3, "faces": faces}]}
+        ),
+        "assets/minecraft/models/block/plain.json": json.dumps(
+            {"elements": [{"from": [0] * 3, "to": [16] * 3, "faces": faces}]}
+        ),
+        "assets/minecraft/textures/block/tex.png": _png((1, 2, 3)),
+    }
+    textures = load_pack(_make_pack(tmp_path / "p.zip", entries))
+    quads = textures.quads("minecraft:thing", {"facing": "north"})
+    assert quads is not None
+    assert len(quads) == 6

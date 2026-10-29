@@ -30,7 +30,9 @@ def test_block_state_properties_read_only():
         props["a"] = "c"
 
 
-def _make_region(unpack, size=Vec3i(2, 3, 4), palette=None):
+def _make_region(
+    unpack, size=Vec3i(2, 3, 4), palette=None, packed=None
+):
     palette = palette or [
         BlockState("minecraft:air", {}),
         BlockState("minecraft:stone", {}),
@@ -44,7 +46,9 @@ def _make_region(unpack, size=Vec3i(2, 3, 4), palette=None):
         entities=(),
         pending_block_ticks=None,
         pending_fluid_ticks=None,
-        packed_indices=np.zeros(8, dtype=np.int64),
+        packed_indices=(
+            packed if packed is not None else np.zeros(8, dtype=np.int64)
+        ),
         _unpack=unpack,
     )
 
@@ -117,6 +121,16 @@ def test_indices_and_packed_read_only():
         region.block_indices[0, 0, 0] = 1
     with pytest.raises(ValueError):
         region.packed_indices[0] = 1
+
+
+def test_packed_read_only_view_does_not_touch_caller_array():
+    packed = np.zeros(8, dtype=np.int64)
+    region = _make_region(
+        lambda: np.zeros((2, 3, 4), dtype=np.uint16), packed=packed
+    )
+    assert packed.flags.writeable
+    assert not region.packed_indices.flags.writeable
+    assert region.packed_indices.base is not None
 
 
 def test_regions_mapping_read_only():

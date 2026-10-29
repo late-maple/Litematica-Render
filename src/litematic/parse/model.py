@@ -118,8 +118,10 @@ class Region:
         self._entities = entities
         self._pending_block_ticks = pending_block_ticks
         self._pending_fluid_ticks = pending_fluid_ticks
-        packed_indices.flags.writeable = False
-        self._packed_indices = packed_indices
+        # Read-only view: the caller keeps ownership of the array it passed.
+        packed = packed_indices.view()
+        packed.flags.writeable = False
+        self._packed_indices = packed
         self._unpack = _unpack
         self._indices: Optional[np.ndarray] = None
 

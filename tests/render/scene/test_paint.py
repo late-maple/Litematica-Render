@@ -39,6 +39,9 @@ def _textures(entries):
         quads_map=quads_map,
         occl_map=occl_map,
         pack_mtime=0.0,
+        states=None,
+        parts_map={},
+        mquad_map={},
     )
 
 
@@ -54,6 +57,9 @@ def _raw_quad_pack(quads, color):
         quads_map={"minecraft:odd[]": quads},
         occl_map={"minecraft:odd[]": False},
         pack_mtime=0.0,
+        states=None,
+        parts_map={},
+        mquad_map={},
     )
 
 
@@ -118,6 +124,9 @@ def test_cross_plant_renders_double_sided():
         quads_map={},
         occl_map={},
         pack_mtime=0.0,
+        states=None,
+        parts_map={},
+        mquad_map={},
     )
     scene = _scene([("minecraft:short_grass", {}, 0, 0, 0)], tex)
     assert scene.quad_dbl.all()

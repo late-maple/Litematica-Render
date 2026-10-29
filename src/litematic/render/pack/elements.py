@@ -46,21 +46,11 @@ _VEC = {
 
 
 
-_NAME = {v: k for k, v in _VEC.items()}
-
-
-
 _ROT_AXIS = {"x": 0, "y": 1, "z": 2}
 
 
 
 _RESCALE_FACTORS = {22.5: 1.0823922, 45.0: 1.4142135}
-# Faces whose normals lie along each axis; a zero-thickness element only
-# keeps these, so degenerate line faces are never emitted.
-
-
-
-_AXIS_FACES = {0: ("west", "east"), 1: ("down", "up"), 2: ("north", "south")}
 
 
 
@@ -303,18 +293,32 @@ def _face_uvs(
     """Resolve per-corner texel coords: explicit uv first, else auto-UV."""
     rect = face.get("uv")
     if rect is None:
-        return [_auto_uv(tier, x, y, z) for (x, y, z) in corners]
-    if not isinstance(rect, (list, tuple)) or len(rect) != 4:
+        uvs = [_auto_uv(tier, x, y, z) for (x, y, z) in corners]
+    else:
+        if not isinstance(rect, (list, tuple)) or len(rect) != 4:
+            return None
+        try:
+            u1, v1, u2, v2 = (float(value) for value in rect)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not all(math.isfinite(value) for value in (u1, v1, u2, v2)):
+            return None
+        if min(u1, v1, u2, v2) < 0.0 or max(u1, v1, u2, v2) > 16.0:
+            return None
+        uvs = [(u1, v1), (u2, v1), (u2, v2), (u1, v2)]
+    rotation = face.get("rotation")
+    if rotation is None:
+        return uvs
+    if isinstance(rotation, bool) or not isinstance(rotation, (int, float)):
         return None
-    try:
-        u1, v1, u2, v2 = (float(value) for value in rect)
-    except (TypeError, ValueError, OverflowError):
+    if rotation not in (0, 90, 180, 270):
         return None
-    if not all(math.isfinite(value) for value in (u1, v1, u2, v2)):
-        return None
-    if min(u1, v1, u2, v2) < 0.0 or max(u1, v1, u2, v2) > 16.0:
-        return None
-    return [(u1, v1), (u2, v1), (u2, v2), (u1, v2)]
+    shift = int(rotation) // 90
+    if shift:
+        # The corner ring runs clockwise on the face, so vanilla's clockwise
+        # texture rotation takes each corner's coords from shift slots back.
+        uvs = uvs[-shift:] + uvs[:-shift]
+    return uvs
 
 
 

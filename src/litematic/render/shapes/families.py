@@ -251,7 +251,7 @@ def _is_cross(stem: str) -> bool:
 
 def _ground_plane(transposed: bool, texkey: str) -> np.ndarray:
     """One full-width dust plane on the block floor; transposed uv runs E-W."""
-    quad = box_quads(0, 0, 0, 16, 0, 16)[[TIER_UP]].copy()
+    quad = box_quads(0, 0, 0, 16, 0, 16)[[TIER_UP]]
     if transposed:
         quad["uv"][0] = quad["vtx"][0][:, [2, 0]]
     quad["texkey"][0] = texkey
@@ -266,7 +266,7 @@ def _wall_strip(tier: int, texkey: str) -> np.ndarray:
         TIER_WEST: (0, 0, 0, 0, 16, 16),
         TIER_EAST: (16, 0, 0, 16, 16, 16),
     }[tier]
-    quad = box_quads(*bounds)[[tier]].copy()
+    quad = box_quads(*bounds)[[tier]]
     quad["texkey"][0] = texkey
     quad["dbl"][0] = True
     quad["shade"][0] = TIER_UP

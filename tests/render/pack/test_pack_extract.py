@@ -11,7 +11,11 @@ from PIL import Image
 from litematic.render.errors import RenderError
 from litematic.render.pack import load_pack
 from litematic.render.pack.elements import _FACE_GEOM, _compile_elements
-from litematic.render.pack.extract import ExtractSummary, _extract_pack
+from litematic.render.pack.extract import (
+    ExtractSummary,
+    _CacheWriteError,
+    _extract_pack,
+)
 from litematic.render.pack.texture import _resolve_ref
 from litematic.render.quads import (
     QUAD_DTYPE,
@@ -143,7 +147,7 @@ def test_plain_block_stateless_entry(tmp_path):
     assert summary.blocks == 1
     assert summary.skipped == 0
     data = _load_npz(dest)
-    assert data["meta/version"].item() == "pack-quads.1"
+    assert data["meta/version"].item() == "pack-quads.2"
     quads = data["quads/minecraft:stone[]"]
     assert quads.dtype == QUAD_DTYPE
     assert quads["texkey"].tolist() == ["block/stone"] * 6
@@ -743,6 +747,62 @@ def test_furnace_front_upright_on_south():
     assert np.allclose(front[0]["uv"], [(0, 0), (16, 0), (16, 16), (0, 16)])
 
 
+def test_face_uv_rotation_permutes_rect_corners():
+    base = [(4, 8), (12, 8), (12, 16), (4, 16)]
+    expected = {
+        0: base,
+        90: [(4, 16), (4, 8), (12, 8), (12, 16)],
+        180: [(12, 16), (4, 16), (4, 8), (12, 8)],
+        270: [(12, 8), (12, 16), (4, 16), (4, 8)],
+    }
+    for rotation, uvs in expected.items():
+        quads = _compile_elements(
+            [
+                _box_element(
+                    {
+                        "south": {
+                            "texture": "#all",
+                            "uv": [4, 8, 12, 16],
+                            "rotation": rotation,
+                        }
+                    }
+                )
+            ],
+            {"all": "block/stone"},
+            "minecraft",
+            0,
+            0,
+            _texkey_stub({"block/stone": "block/stone"}),
+        )
+        assert quads is not None
+        assert np.allclose(quads[0]["uv"], uvs)
+
+
+def test_face_uv_rotation_applies_to_auto_uv():
+    quads = _compile_elements(
+        [_box_element({"south": {"texture": "#all", "rotation": 180}})],
+        {"all": "block/stone"},
+        "minecraft",
+        0,
+        0,
+        _texkey_stub({"block/stone": "block/stone"}),
+    )
+    assert quads is not None
+    assert np.allclose(quads[0]["uv"], [(16, 16), (0, 16), (0, 0), (16, 0)])
+
+
+def test_face_uv_rotation_out_of_vanilla_set_skips_face():
+    quads = _compile_elements(
+        [_box_element({"south": {"texture": "#all", "rotation": 45}})],
+        {"all": "block/stone"},
+        "minecraft",
+        0,
+        0,
+        _texkey_stub({"block/stone": "block/stone"}),
+    )
+    assert quads is None
+
+
 def test_non_parallelogram_face_skipped():
     faces = {name: {"texture": "#all"} for name in _FACES}
     bad = _box_element(faces, frm=(float("nan"), 0, 0))
@@ -841,7 +901,7 @@ def test_face_geom_matches_unit_cube_quads():
 
 def test_npz_v3_roundtrip(tmp_path):
     data = _load_npz(_extract(tmp_path, _stone_entries()))
-    assert data["meta/version"].item() == "pack-quads.1"
+    assert data["meta/version"].item() == "pack-quads.2"
     assert "quads/minecraft:stone[]" in data.files
     assert "occl/minecraft:stone[]" in data.files
     quads = data["quads/minecraft:stone[]"]
@@ -853,6 +913,19 @@ def test_npz_v3_roundtrip(tmp_path):
     occl = data["occl/minecraft:stone[]"]
     assert occl.dtype == np.uint8
     assert int(occl.item()) == 1
+
+
+def test_npz_midwrite_failure_maps_to_cache_write_error(tmp_path, monkeypatch):
+    pack_file = _make_pack(tmp_path / "pack.zip", _stone_entries())
+    real_zip = zipfile.ZipFile
+
+    class FullDiskZip(real_zip):
+        def writestr(self, *args, **kwargs):
+            raise OSError("disk full")
+
+    monkeypatch.setattr(zipfile, "ZipFile", FullDiskZip)
+    with pytest.raises(_CacheWriteError):
+        _extract_pack(pack_file, tmp_path / "out.npz")
 
 
 def test_occl_requires_unit_cube_and_opaque(tmp_path):

@@ -38,7 +38,7 @@ def isometric(
 ) -> np.ndarray:
     """Render a schematic to an RGBA isometric image within max_size."""
     if yaw not in (0, 1, 2, 3):
-        raise ValueError(f"render: yaw must be 0-3, got {yaw}")
+        raise RenderError(f"render: yaw must be 0-3, got {yaw}")
     if not _MAX_SIZE_BOUNDS[0] <= max_size <= _MAX_SIZE_BOUNDS[1]:
         raise RenderError(
             f"render: max_size must be "

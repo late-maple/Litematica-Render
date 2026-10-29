@@ -263,7 +263,14 @@ def loads(data: bytes) -> Litematic:
 
 def load(path: str | Path) -> Litematic:
     """Read and parse a .litematic file into a Litematic model."""
-    p = Path(path)
+    if not isinstance(path, (str, Path)):
+        raise LitematicError(
+            f"load() expects a str or Path, got {type(path).__name__}"
+        )
+    try:
+        p = Path(path)
+    except ValueError as exc:
+        raise LitematicError(f"Cannot read {path!r}: {exc}") from exc
     try:
         data = p.read_bytes()
     except OSError as exc:

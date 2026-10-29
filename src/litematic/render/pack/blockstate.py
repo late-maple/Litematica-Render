@@ -22,25 +22,12 @@ def _block_id(state_name: str) -> str:
 
 
 
-def _multipart_applies(
-    parts: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Collect the apply model refs of every multipart part."""
-    applies: list[dict[str, Any]] = []
-    for part in parts:
-        apply = part.get("apply")
-        entries = apply if isinstance(apply, list) else [apply]
-        for entry in entries:
-            if isinstance(entry, dict) and isinstance(entry.get("model"), str):
-                applies.append(entry)
-    return applies
-
-
-
 def _when_matches(
     condition: Mapping[str, Any], values: Mapping[str, str]
 ) -> bool:
     """Vanilla multipart condition: OR/AND nesting, | alternatives."""
+    if not isinstance(condition, Mapping):
+        return False
     for key, expected in condition.items():
         if key == "OR" or key == "AND":
             if not isinstance(expected, list):

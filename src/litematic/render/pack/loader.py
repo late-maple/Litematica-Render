@@ -31,9 +31,9 @@ class Textures(NamedTuple):
     quads_map: dict[str, np.ndarray]
     occl_map: dict[str, bool]
     pack_mtime: float
-    states: dict[str, dict[str, dict[str, str]]] | None = None
-    parts_map: dict[str, str] = {}
-    mquad_map: dict[str, np.ndarray] = {}
+    states: dict[str, dict[str, dict[str, str]]] | None
+    parts_map: dict[str, str]
+    mquad_map: dict[str, np.ndarray]
 
     def quads(
         self, name: str, properties: Mapping[str, str]

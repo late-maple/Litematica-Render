@@ -33,6 +33,9 @@ def _textures(occl):
         quads_map={"minecraft:stone[]": unit_cube_quads("block/stone")},
         occl_map={"minecraft:stone[]": occl},
         pack_mtime=0.0,
+        states=None,
+        parts_map={},
+        mquad_map={},
     )
 
 
@@ -136,6 +139,9 @@ def test_yaw_remaps_tier_and_vertices():
         quads_map={"minecraft:stone[]": quads},
         occl_map={"minecraft:stone[]": False},
         pack_mtime=0.0,
+        states=None,
+        parts_map={},
+        mquad_map={},
     )
     scene = _compose(_single_block("minecraft:stone"), 1, tex)
     assert scene.quad_shade.tolist() == [TIER_EAST]
@@ -224,6 +230,9 @@ def test_yaw_rotation_quadrants():
         },
         occl_map={"minecraft:stone[]": True, "minecraft:gold_block[]": True},
         pack_mtime=0.0,
+        states=None,
+        parts_map={},
+        mquad_map={},
     )
     palette = [
         ("minecraft:air", {}),
@@ -329,6 +338,9 @@ def test_dbl_quads_keep_full_ao_next_to_occluders():
         },
         occl_map={"minecraft:short_grass[]": False, "minecraft:stone[]": True},
         pack_mtime=0.0,
+        states=None,
+        parts_map={},
+        mquad_map={},
     )
     palette = [
         ("minecraft:air", {}),

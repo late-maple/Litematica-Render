@@ -121,7 +121,7 @@ def test_all_air_rejected(tmp_path):
 
 
 def test_yaw_out_of_range():
-    with pytest.raises(ValueError):
+    with pytest.raises(RenderError, match="yaw must be 0-3"):
         isometric(_schem(_TWO), textures_path=None, yaw=4)
 
 

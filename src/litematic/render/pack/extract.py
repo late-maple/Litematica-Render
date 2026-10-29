@@ -50,7 +50,7 @@ _FIXED_DATE = (1980, 1, 1, 0, 0, 0)
 
 
 
-_NPZ_VERSION = "pack-quads.1"
+_NPZ_VERSION = "pack-quads.2"
 
 
 
@@ -568,15 +568,14 @@ def _write_npz(
     for key, quads in mquad_map.items():
         entries[f"mquads/{key}"] = sort_quads(quads)
     try:
-        out = zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED)
+        with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as out:
+            for key in sorted(entries):
+                buffer = io.BytesIO()
+                np.lib.format.write_array(buffer, entries[key], allow_pickle=False)
+                info = zipfile.ZipInfo(key, date_time=_FIXED_DATE)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                out.writestr(info, buffer.getvalue())
     except OSError as exc:
         raise _CacheWriteError(
             f"extract: cannot write npz: {dest}: {exc}"
         ) from exc
-    with out:
-        for key in sorted(entries):
-            buffer = io.BytesIO()
-            np.lib.format.write_array(buffer, entries[key], allow_pickle=False)
-            info = zipfile.ZipInfo(key, date_time=_FIXED_DATE)
-            info.compress_type = zipfile.ZIP_DEFLATED
-            out.writestr(info, buffer.getvalue())
