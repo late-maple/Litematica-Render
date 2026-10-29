@@ -24,7 +24,13 @@ def _bits_for(palette_size: int) -> int:
     return max(2, (palette_size - 1).bit_length())
 
 
-def _unpack_indices(packed: np.ndarray, bits: int, size: Vec3i) -> np.ndarray:
+def _unpack_indices(
+    packed: np.ndarray,
+    bits: int,
+    size: Vec3i,
+    start_entry: int = 0,
+    stop_entry: int | None = None,
+) -> np.ndarray:
     """Unpack litematica's continuous bit stream into an (x, y, z) index array.
 
     Entry i starts at bit i*bits of the long array, filling each long upward
@@ -33,16 +39,21 @@ def _unpack_indices(packed: np.ndarray, bits: int, size: Vec3i) -> np.ndarray:
     YZX: index = (y*lenZ + z)*lenX + x. Palettes wider than 16 bits need
     uint32 output. Entries are processed in fixed-size chunks so transient
     memory stays a small multiple of the output array regardless of size.
+    Pass [start_entry, stop_entry) to unpack a Y-rows range only; the range
+    is a contiguous entry span, so no state beyond the offsets is needed.
     """
     count = size.x * size.y * size.z
+    if stop_entry is None:
+        stop_entry = count
+    span = stop_entry - start_entry
     words = packed.view(np.uint64)  # logical shifts; int64 storage is untouched
     dtype = np.uint16 if bits <= 16 else np.uint32
-    out = np.empty(count, dtype=dtype)
+    out = np.empty(span, dtype=dtype)
     mask = np.uint64((1 << bits) - 1)
     chunk = 1 << 18
-    for start in range(0, count, chunk):
-        stop = min(start + chunk, count)
-        positions = np.arange(start, stop, dtype=np.uint64) * np.uint64(bits)
+    for base in range(start_entry, stop_entry, chunk):
+        stop = min(base + chunk, stop_entry)
+        positions = np.arange(base, stop, dtype=np.uint64) * np.uint64(bits)
         long_index = positions >> np.uint64(6)
         bit_offset = positions & np.uint64(63)
         values = words[long_index] >> bit_offset
@@ -53,8 +64,9 @@ def _unpack_indices(packed: np.ndarray, bits: int, size: Vec3i) -> np.ndarray:
                 np.uint64(64) - bit_offset[crossing]
             )
         values &= mask
-        out[start:stop] = values
-    return out.reshape(size.y, size.z, size.x).transpose(2, 0, 1)
+        out[base - start_entry : stop - start_entry] = values
+    rows = span // (size.z * size.x)
+    return out.reshape(rows, size.z, size.x).transpose(2, 0, 1)
 
 
 def _vec3(compound: Mapping, field: str, source: str) -> Vec3i:
@@ -129,6 +141,29 @@ def _make_unpacker(
         return arr
 
     return unpack
+
+
+def _make_slab_unpacker(
+    packed: np.ndarray,
+    bits: int,
+    size: Vec3i,
+    source: str,
+    palette_size: int,
+) -> Callable[[int, int], np.ndarray]:
+    def unpack_slab(y0: int, y1: int) -> np.ndarray:
+        span = (y1 - y0) * size.z * size.x
+        arr = _unpack_indices(
+            packed, bits, size, y0 * size.z * size.x,
+            y0 * size.z * size.x + span,
+        )
+        if arr.size and int(arr.max()) >= palette_size:
+            raise LitematicFormatError(
+                f"{source}: block index {int(arr.max())} out of range "
+                f"for palette of {palette_size} in rows [{y0}, {y1})"
+            )
+        return arr
+
+    return unpack_slab
 
 
 def _parse_pending_ticks(
@@ -234,6 +269,9 @@ def _parse_region(name: str, region: Mapping, source: str) -> Region:
         pending_fluid_ticks=pending_fluid_ticks,
         packed_indices=packed,
         _unpack=_make_unpacker(packed, bits, size, where, len(palette)),
+        _unpack_slab=_make_slab_unpacker(
+            packed, bits, size, where, len(palette)
+        ),
     )
 
 

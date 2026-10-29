@@ -109,6 +109,7 @@ class Region:
         pending_fluid_ticks: Optional[tuple[Mapping[str, object], ...]],
         packed_indices: np.ndarray,
         _unpack: Callable[[], np.ndarray],
+        _unpack_slab: Optional[Callable[[int, int], np.ndarray]] = None,
     ) -> None:
         self._name = name
         self._position = position
@@ -123,6 +124,7 @@ class Region:
         packed.flags.writeable = False
         self._packed_indices = packed
         self._unpack = _unpack
+        self._unpack_slab = _unpack_slab
         self._indices: Optional[np.ndarray] = None
 
     @property
@@ -183,6 +185,24 @@ class Region:
             indices.flags.writeable = False
             self._indices = indices
         return self._indices
+
+    def slab_indices(self, y0: int, y1: int) -> np.ndarray:
+        """Palette indices for rows [y0, y1), shape (x, y1-y0, z); not cached.
+
+        Unpacks only the slab's contiguous entry span of the packed stream
+        when the parser injected a slab unpacker, so callers can stream a
+        region without ever materializing `block_indices`.
+        """
+        if not (0 <= y0 < y1 <= self._size.y):
+            raise IndexError(
+                f"Slab rows out of range: [{y0}, {y1}) for size {self._size}"
+            )
+        if self._unpack_slab is not None:
+            arr = self._unpack_slab(y0, y1)
+        else:
+            arr = np.ascontiguousarray(self.block_indices[:, y0:y1, :])
+        arr.flags.writeable = False
+        return arr
 
     def get_block(self, x: int, y: int, z: int) -> BlockState:
         """Return the block state at local coordinates (x, y, z).

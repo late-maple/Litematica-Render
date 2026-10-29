@@ -194,11 +194,10 @@ def _compose_inner(schem: Litematic, yaw: int, textures: Textures) -> _Scene:
     written = 0
     for region, luts, stash in plan:
         px, py, pz = region.position.x, region.position.y, region.position.z
-        idx = region.block_indices
         for y0, y1, lx, ly, lz, picked in stash:
             written += _expand_slab_into(
                 arena, written, y0, y1, lx, ly, lz, picked,
-                luts, idx, tier_map, yaw, (px, py, pz),
+                luts, region, tier_map, yaw, (px, py, pz),
             )
         stash.clear()
     x = arena.x[:written]
@@ -497,22 +496,19 @@ def _register_key(
 
 
 def _occlusion_window(
-    idx: np.ndarray, occludes: np.ndarray, y0: int, y1: int
+    widx: np.ndarray, occludes: np.ndarray, wy0: int
 ) -> tuple[np.ndarray, tuple[int, int, int], int]:
-    """False-padded flat occlusion grid over rows [y0-1, y1].
+    """False-padded flat occlusion grid over the window's index rows.
 
     AO and cullface lookups reach at most one row beyond the slab, so the
-    window never needs the rest of the region; region-edge rows fall to
-    the False padding exactly like the vanilla out-of-bounds air.
+    window (rows [wy0, wy1), unpacked on demand) never needs the rest of
+    the region; region-edge rows fall to the False padding exactly like
+    the vanilla out-of-bounds air.
     """
-    sx, sy, sz = idx.shape
-    wy0 = max(y0 - 1, 0)
-    wy1 = min(y1 + 1, sy)
-    padded = np.zeros((sx + 2, wy1 - wy0 + 2, sz + 2), bool)
-    padded[1 : sx + 1, 1 : wy1 - wy0 + 1, 1 : sz + 1] = occludes[
-        idx[:, wy0:wy1, :]
-    ]
-    strides = ((wy1 - wy0 + 2) * (sz + 2), sz + 2, 1)
+    sx, win_h, sz = widx.shape
+    padded = np.zeros((sx + 2, win_h + 2, sz + 2), bool)
+    padded[1 : sx + 1, 1 : win_h + 1, 1 : sz + 1] = occludes[widx]
+    strides = ((win_h + 2) * (sz + 2), sz + 2, 1)
     return padded.ravel(), strides, wy0
 
 
@@ -523,18 +519,21 @@ def _visible_slabs(
     dir_b: tuple[int, int],
 ):
     """Yield each slab's row span plus its visible cells for the arena."""
-    idx = region.block_indices
-    sx, sy, sz = idx.shape
+    sx, sy, sz = region.size
     is_air, occludes = luts.is_air, luts.occludes
     for y0 in range(0, sy, _Y_SLAB):
         y1 = min(y0 + _Y_SLAB, sy)
-        body = idx[:, y0:y1, :]
+        body = region.slab_indices(y0, y1)
         present = ~is_air[body]
         occ_body = occludes[body]
-        rows = idx[:, y0 : min(y1 + 1, sy), :]
-        upper = occludes[rows][:, 1:, :]
+        upper = occludes[body][:, 1:, :]
         if y1 == sy:
-            upper = np.concatenate([upper, np.zeros((sx, 1, sz), bool)], axis=1)
+            next_row = np.zeros((sx, 1, sz), bool)
+        else:
+            # One extra row past the slab edge; a single-row unpack keeps
+            # the visibility pass from paying for the next slab's body.
+            next_row = occludes[region.slab_indices(y1, y1 + 1)]
+        upper = np.concatenate([upper, next_row], axis=1)
         occ_a = _shifted(occ_body, *dir_a)
         occ_b = _shifted(occ_body, *dir_b)
         visible = present & ~(upper & occ_a & occ_b)
@@ -568,7 +567,7 @@ def _expand_slab_into(
     lz: np.ndarray,
     picked: np.ndarray,
     luts: _Luts,
-    idx: np.ndarray,
+    region,
     tier_map: np.ndarray,
     yaw: int,
     position: tuple[int, int, int],
@@ -595,9 +594,12 @@ def _expand_slab_into(
     cells = cells[keep]
     ids = ids[keep]
     cell_of = cell_of[keep]
-    occ = _occlusion_window(idx, luts.occludes, y0, y1)
+    wy0 = max(y0 - 1, 0)
+    widx = region.slab_indices(wy0, min(y1 + 1, region.size.y))
+    occ = _occlusion_window(widx, luts.occludes, wy0)
     alive = _cull_alive(
-        quads, cells, picked[cell_of], luts.cull_class, occ, idx
+        quads, cells, picked[cell_of], luts.cull_class, occ, widx, wy0,
+        region.size.y,
     )
     quads = quads[alive]
     cells = cells[alive]
@@ -622,7 +624,9 @@ def _cull_alive(
     cell_palette: np.ndarray,
     cull_class: np.ndarray,
     occ: tuple[np.ndarray, tuple[int, int, int], int],
-    idx: np.ndarray,
+    widx: np.ndarray,
+    wy0: int,
+    sy: int,
 ) -> np.ndarray:
     """Alive mask after neighbor culling; no-cullface rows always alive."""
     mask = np.ones(len(quads), bool)
@@ -631,7 +635,7 @@ def _cull_alive(
     if len(rows) == 0:
         return mask
     nb = cells[rows] + _TIER_NORMALS[cull[rows].astype(np.int64)]
-    sx, sy, sz = idx.shape
+    sx, _, sz = widx.shape
     valid = (
         (nb[..., 0] >= 0) & (nb[..., 0] < sx)
         & (nb[..., 1] >= 0) & (nb[..., 1] < sy)
@@ -645,7 +649,7 @@ def _cull_alive(
         ],
         axis=1,
     )
-    flat, (st_x, st_y, st_z), wy0 = occ
+    flat, (st_x, st_y, st_z), win_y0 = occ
     win_h = st_x // st_y - 2
     nb_pad = np.stack(
         [
@@ -657,10 +661,14 @@ def _cull_alive(
     )
     occluded = flat[
         (nb_pad[..., 0] + 1) * st_x
-        + (nb_pad[..., 1] + 1 - wy0) * st_y
+        + (nb_pad[..., 1] + 1 - win_y0) * st_y
         + (nb_pad[..., 2] + 1) * st_z
     ]
-    neighbor_pi = idx[nb_clipped[..., 0], nb_clipped[..., 1], nb_clipped[..., 2]]
+    neighbor_pi = widx[
+        nb_clipped[..., 0],
+        nb_clipped[..., 1] - wy0,
+        nb_clipped[..., 2],
+    ]
     own = cull_class[cell_palette[rows]]
     pair = (
         valid
