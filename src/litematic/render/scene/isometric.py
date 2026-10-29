@@ -10,6 +10,7 @@ from litematic.render.pack import Textures
 from litematic.render.pack.texture import _tint_for
 from litematic.render.quads import (
     AO_LEVELS,
+    CULL_NONE,
     TIER_DOWN,
     TIER_EAST,
     TIER_NORTH,
@@ -21,6 +22,7 @@ from litematic.render.quads import (
 from litematic.render.shapes import builtin_quads
 
 _AIR_NAMES = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air"}
+_WATER_FAMILY = {"minecraft:water", "minecraft:bubble_column"}
 _Y_SLAB = 64
 _MAGENTA_TEXKEY = "__magenta__"
 _MAGENTA_ARRAY = np.full((16, 16, 4), (255, 0, 255, 255), np.uint8)
@@ -118,6 +120,7 @@ class _Luts(NamedTuple):
     pool: np.ndarray | None  # (P,) QUAD_DTYPE, None when every entry is air
     offsets: np.ndarray  # (E + 1,) i8 start of each entry's rows in pool
     texkey_ids: np.ndarray  # (P,) i32 per-pool-row texkey id
+    cull_class: np.ndarray  # (P,) i32 pair class, negative entries never pair
 
 
 class _Piece(NamedTuple):
@@ -158,11 +161,14 @@ def _compose_inner(schem: Litematic, yaw: int, textures: Textures) -> _Scene:
         if luts.pool is None:
             continue
         grid = _occlusion_grid(region, luts.occludes)
+        idx = region.block_indices
         px, py, pz = region.position.x, region.position.y, region.position.z
         for cx, cy, cz, picked in _visible_slabs(
             region, luts, dir_a, dir_b
         ):
-            piece = _expand_slab(cx, cy, cz, picked, luts, grid, tier_map, yaw)
+            piece = _expand_slab(
+                cx, cy, cz, picked, luts, grid, idx, tier_map, yaw
+            )
             if len(piece.cells) == 0:
                 continue
             pieces.append(piece)
@@ -214,6 +220,29 @@ def _empty_scene() -> _Scene:
     )
 
 
+def _cull_classes(palette) -> np.ndarray:
+    """Pair class per palette entry; negative entries never pair.
+
+    Same block name pairs (glass, ice, slime, water levels); the water
+    family pairs across names; leaves never pair (cutout leaves default).
+    """
+    classes = np.full(len(palette), -1, np.int32)
+    ids: dict[str, int] = {}
+    for i, state in enumerate(palette):
+        if state.name in _AIR_NAMES:
+            continue
+        if state.name.partition(":")[2].endswith("leaves"):
+            continue
+        if state.name in _WATER_FAMILY:
+            classes[i] = 0
+            continue
+        key = state.name
+        if key not in ids:
+            ids[key] = len(ids) + 1
+        classes[i] = ids[key]
+    return classes
+
+
 def _palette_luts(
     palette, textures: Textures, key_ids: dict[str, int], key_arrays: dict
 ) -> _Luts:
@@ -221,6 +250,7 @@ def _palette_luts(
     count = len(palette)
     is_air = np.zeros(count, bool)
     occludes = np.zeros(count, bool)
+    cull_class = _cull_classes(palette)
     quads_pieces: list[np.ndarray] = []
     id_pieces: list[np.ndarray] = []
     lengths = np.zeros(count + 1, np.int64)
@@ -234,12 +264,15 @@ def _palette_luts(
         id_pieces.append(_texkey_ids(quads, textures, key_ids, key_arrays))
         lengths[i + 1] = len(quads)
     if not quads_pieces:
-        return _Luts(is_air, occludes, None, np.cumsum(lengths), np.zeros(0, np.int32))
+        return _Luts(
+            is_air, occludes, None, np.cumsum(lengths), np.zeros(0, np.int32),
+            cull_class,
+        )
     pool = (
         np.concatenate(quads_pieces) if len(quads_pieces) > 1 else quads_pieces[0]
     )
     ids = np.concatenate(id_pieces) if len(id_pieces) > 1 else id_pieces[0]
-    return _Luts(is_air, occludes, pool, np.cumsum(lengths), ids)
+    return _Luts(is_air, occludes, pool, np.cumsum(lengths), ids, cull_class)
 
 
 def _state_quads(state, textures: Textures) -> np.ndarray:
@@ -488,6 +521,7 @@ def _expand_slab(
     picked: np.ndarray,
     luts: _Luts,
     grid: np.ndarray,
+    idx: np.ndarray,
     tier_map: np.ndarray,
     yaw: int,
 ) -> _Piece:
@@ -510,15 +544,63 @@ def _expand_slab(
     new_tier = tier_map[quads["shade"]]
     keep = np.isin(new_tier, _CAMERA_TIERS)
     quads = quads[keep]
+    cells = cells[keep]
+    ids = ids[keep]
+    cell_of = cell_of[keep]
+    alive = _cull_alive(
+        quads, cells, picked[cell_of], luts.cull_class, grid, idx
+    )
+    quads = quads[alive]
     return _Piece(
-        cells[keep],
+        cells[alive],
         _rotate_vertices(quads["vtx"], yaw),
         quads["uv"],
-        _vertex_ao(quads, cells[keep], grid),
-        new_tier[keep],
+        _vertex_ao(quads, cells[alive], grid),
+        new_tier[keep][alive],
         quads["dbl"],
-        ids[keep],
+        ids[alive],
     )
+
+
+def _cull_alive(
+    quads: np.ndarray,
+    cells: np.ndarray,
+    cell_palette: np.ndarray,
+    cull_class: np.ndarray,
+    grid: np.ndarray,
+    idx: np.ndarray,
+) -> np.ndarray:
+    """Alive mask after neighbor culling; no-cullface rows always alive."""
+    mask = np.ones(len(quads), bool)
+    cull = quads["cull"]
+    rows = np.nonzero(cull != CULL_NONE)[0]
+    if len(rows) == 0:
+        return mask
+    nb = cells[rows] + _TIER_NORMALS[cull[rows].astype(np.int64)]
+    sx, sy, sz = grid.shape
+    valid = (
+        (nb[..., 0] >= 0) & (nb[..., 0] < sx)
+        & (nb[..., 1] >= 0) & (nb[..., 1] < sy)
+        & (nb[..., 2] >= 0) & (nb[..., 2] < sz)
+    )
+    nb_clipped = np.stack(
+        [
+            np.clip(nb[..., 0], 0, sx - 1),
+            np.clip(nb[..., 1], 0, sy - 1),
+            np.clip(nb[..., 2], 0, sz - 1),
+        ],
+        axis=1,
+    )
+    occluded = grid[nb_clipped[..., 0], nb_clipped[..., 1], nb_clipped[..., 2]]
+    neighbor_pi = idx[nb_clipped[..., 0], nb_clipped[..., 1], nb_clipped[..., 2]]
+    own = cull_class[cell_palette[rows]]
+    pair = (
+        valid
+        & (own >= 0)
+        & (own == cull_class[neighbor_pi])
+    )
+    mask[rows] = ~(occluded | pair)
+    return mask
 
 
 def _empty_piece() -> _Piece:

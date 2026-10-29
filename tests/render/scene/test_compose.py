@@ -607,3 +607,164 @@ def test_backfill_pane_prefers_pane_top_texture():
     }
     assert _backfill_builtin("minecraft:black_stained_glass_pane", built, arrays)
     assert (built["texkey"] == "block/black_stained_glass_pane_top").all()
+
+
+# Neighbor face culling: quads with a cullface tier disappear when the
+# neighbor occludes or pairs (same name / water family); leaves never pair.
+
+
+def _cull_cube(texkey):
+    quads = unit_cube_quads(texkey)
+    quads["cull"] = np.arange(6, dtype=np.uint8)
+    return quads
+
+
+def _pair_pack(entries):
+    """Full cubes with vanilla-style per-face cullfaces.
+
+    entries: {block name: (texkey, occludes)}.
+    """
+    arrays, quads_map, occl_map = {}, {}, {}
+    for name, (texkey, occl) in entries.items():
+        arrays[texkey] = np.full((16, 16, 4), _STONE, np.uint8)
+        quads_map[f"{name}[]"] = _cull_cube(texkey)
+        occl_map[f"{name}[]"] = occl
+    return Textures(
+        version="pack-quads",
+        arrays=arrays,
+        quads_map=quads_map,
+        occl_map=occl_map,
+        pack_mtime=0.0,
+        states=None,
+        parts_map={},
+        mquad_map={},
+    )
+
+
+def _row_scene(entries, left, right):
+    """2x1x1 row of two named blocks from a _pair_pack."""
+    textures = _pair_pack(entries)
+    palette = [("minecraft:air", {})]
+    for name in (left, right):
+        if name not in [n for n, _ in palette]:
+            props = {}
+            if isinstance(name, tuple):
+                name, props = name
+            palette.append((name, props))
+    indices = np.array(
+        [palette.index(("minecraft:air", {})) + 1, len(palette) - 1],
+        dtype=np.uint16,
+    )
+    def _palette_index(entry):
+        name = entry if isinstance(entry, str) else entry[0]
+        return next(i for i, (n, _) in enumerate(palette) if n == name)
+
+    indices[0] = _palette_index(left)
+    indices[1] = _palette_index(right)
+    schem = _schematic([("Main", (0, 0, 0), (2, 1, 1), palette, indices)])
+    return _compose(schem, 0, textures)
+
+
+def _cell_tiers(scene):
+    """(x, y, z, tier) tuples of all scene quads."""
+    return set(
+        zip(
+            scene.x.tolist(),
+            scene.y.tolist(),
+            scene.z.tolist(),
+            scene.quad_shade.tolist(),
+        )
+    )
+
+
+def test_cullface_culled_by_opaque_neighbor():
+    entries = {
+        "minecraft:glass": ("block/glass", False),
+        "minecraft:stone": ("block/stone", True),
+    }
+    scene = _row_scene(entries, "minecraft:glass", "minecraft:stone")
+    tiers = _cell_tiers(scene)
+    assert (0, 0, 0, TIER_EAST) not in tiers  # hidden by the stone
+    assert (0, 0, 0, TIER_UP) in tiers  # open sky above
+
+
+def test_cullface_kept_by_transparent_neighbor():
+    entries = {
+        "minecraft:glass": ("block/glass", False),
+        "minecraft:ice": ("block/ice", False),
+    }
+    scene = _row_scene(entries, "minecraft:glass", "minecraft:ice")
+    assert (0, 0, 0, TIER_EAST) in _cell_tiers(scene)
+
+
+def test_same_name_pairs_cull():
+    entries = {"minecraft:glass": ("block/glass", False)}
+    scene = _row_scene(entries, "minecraft:glass", "minecraft:glass")
+    assert (0, 0, 0, TIER_EAST) not in _cell_tiers(scene)
+
+
+def test_different_names_do_not_pair():
+    entries = {
+        "minecraft:red_stained_glass": ("block/red", False),
+        "minecraft:blue_stained_glass": ("block/blue", False),
+    }
+    scene = _row_scene(
+        entries, "minecraft:red_stained_glass", "minecraft:blue_stained_glass"
+    )
+    assert (0, 0, 0, TIER_EAST) in _cell_tiers(scene)
+
+
+def test_water_levels_pair():
+    entries = {"minecraft:water": ("block/water", False)}
+    scene = _row_scene(
+        entries,
+        ("minecraft:water", {"level": "0"}),
+        ("minecraft:water", {"level": "1"}),
+    )
+    assert (0, 0, 0, TIER_EAST) not in _cell_tiers(scene)
+
+
+def test_water_family_cross_pairs():
+    entries = {
+        "minecraft:water": ("block/water", False),
+        "minecraft:bubble_column": ("block/bubble", False),
+    }
+    scene = _row_scene(
+        entries, "minecraft:water", "minecraft:bubble_column"
+    )
+    assert (0, 0, 0, TIER_EAST) not in _cell_tiers(scene)
+
+
+def test_leaves_family_never_pairs():
+    entries = {
+        "minecraft:oak_leaves": ("block/oak", False),
+        "minecraft:birch_leaves": ("block/birch", False),
+    }
+    scene = _row_scene(
+        entries, "minecraft:oak_leaves", "minecraft:birch_leaves"
+    )
+    assert (0, 0, 0, TIER_EAST) in _cell_tiers(scene)
+
+
+def test_ice_pairs_same_name():
+    entries = {"minecraft:ice": ("block/ice", False)}
+    scene = _row_scene(entries, "minecraft:ice", "minecraft:ice")
+    assert (0, 0, 0, TIER_EAST) not in _cell_tiers(scene)
+
+
+def test_slime_and_honey_do_not_pair():
+    entries = {
+        "minecraft:slime_block": ("block/slime", False),
+        "minecraft:honey_block": ("block/honey", False),
+    }
+    scene = _row_scene(
+        entries, "minecraft:slime_block", "minecraft:honey_block"
+    )
+    assert (0, 0, 0, TIER_EAST) in _cell_tiers(scene)
+
+
+def test_region_boundary_never_culls():
+    entries = {"minecraft:ice": ("block/ice", False)}
+    scene = _row_scene(entries, "minecraft:ice", "minecraft:ice")
+    # The right cell's east face points out of the region: kept.
+    assert (1, 0, 0, TIER_EAST) in _cell_tiers(scene)
