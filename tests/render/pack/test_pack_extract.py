@@ -148,7 +148,7 @@ def test_plain_block_stateless_entry(tmp_path):
     assert summary.blocks == 1
     assert summary.skipped == 0
     data = _load_npz(dest)
-    assert data["meta/version"].item() == "pack-quads.5"
+    assert data["meta/version"].item() == "pack-quads.1"
     quads = data["quads/minecraft:stone[]"]
     assert quads.dtype == QUAD_DTYPE
     assert quads["texkey"].tolist() == ["block/stone"] * 6
@@ -905,7 +905,7 @@ def test_face_geom_matches_unit_cube_quads():
 
 def test_npz_v3_roundtrip(tmp_path):
     data = _load_npz(_extract(tmp_path, _stone_entries()))
-    assert data["meta/version"].item() == "pack-quads.5"
+    assert data["meta/version"].item() == "pack-quads.1"
     assert "quads/minecraft:stone[]" in data.files
     assert "occl/minecraft:stone[]" in data.files
     quads = data["quads/minecraft:stone[]"]
@@ -1763,4 +1763,4 @@ def test_pack_quads4_cache_rebuilds(tmp_path):
     cache = tmp_path / "pack.litematic-tex.npz"
     np.savez(cache, **data)
     textures = load_pack(pack_file)
-    assert textures.version == "pack-quads.5"
+    assert textures.version == "pack-quads.1"

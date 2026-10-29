@@ -160,14 +160,14 @@ def _compose_inner(schem: Litematic, yaw: int, textures: Textures) -> _Scene:
         luts = _palette_luts(region.palette, textures, key_ids, key_arrays)
         if luts.pool is None:
             continue
-        grid = _occlusion_grid(region, luts.occludes)
+        occ = _occlusion_flat(region, luts.occludes)
         idx = region.block_indices
         px, py, pz = region.position.x, region.position.y, region.position.z
         for cx, cy, cz, picked in _visible_slabs(
             region, luts, dir_a, dir_b
         ):
             piece = _expand_slab(
-                cx, cy, cz, picked, luts, grid, idx, tier_map, yaw
+                cx, cy, cz, picked, luts, occ, idx, tier_map, yaw
             )
             if len(piece.cells) == 0:
                 continue
@@ -460,16 +460,19 @@ def _register_key(
     return key_ids[key]
 
 
-def _occlusion_grid(region, occludes: np.ndarray) -> np.ndarray:
-    """Gather per-cell occlusion flags into a dense region-local grid."""
+def _occlusion_flat(
+    region, occludes: np.ndarray
+) -> tuple[np.ndarray, tuple[int, int, int]]:
+    """Region occlusion as a False-padded flat grid plus per-axis strides."""
     idx = region.block_indices
-    slabs = [
-        occludes[idx[:, y0 : min(y0 + _Y_SLAB, idx.shape[1]), :]]
-        for y0 in range(0, idx.shape[1], _Y_SLAB)
-    ]
-    if not slabs:
-        return np.zeros((idx.shape[0], 0, idx.shape[2]), bool)
-    return np.concatenate(slabs, axis=1)
+    sx, sy, sz = idx.shape
+    padded = np.zeros((sx + 2, sy + 2, sz + 2), bool)
+    for y0 in range(0, sy, _Y_SLAB):
+        y1 = min(y0 + _Y_SLAB, sy)
+        padded[1 : sx + 1, 1 + y0 : 1 + y1, 1 : sz + 1] = occludes[
+            idx[:, y0:y1, :]
+        ]
+    return padded.ravel(), ((sy + 2) * (sz + 2), sz + 2, 1)
 
 
 def _visible_slabs(
@@ -520,7 +523,7 @@ def _expand_slab(
     cz: np.ndarray,
     picked: np.ndarray,
     luts: _Luts,
-    grid: np.ndarray,
+    occ: tuple[np.ndarray, tuple[int, int, int]],
     idx: np.ndarray,
     tier_map: np.ndarray,
     yaw: int,
@@ -548,14 +551,14 @@ def _expand_slab(
     ids = ids[keep]
     cell_of = cell_of[keep]
     alive = _cull_alive(
-        quads, cells, picked[cell_of], luts.cull_class, grid, idx
+        quads, cells, picked[cell_of], luts.cull_class, occ, idx
     )
     quads = quads[alive]
     return _Piece(
         cells[alive],
         _rotate_vertices(quads["vtx"], yaw),
         quads["uv"],
-        _vertex_ao(quads, cells[alive], grid),
+        _vertex_ao(quads, cells[alive], *occ),
         new_tier[keep][alive],
         quads["dbl"],
         ids[alive],
@@ -567,7 +570,7 @@ def _cull_alive(
     cells: np.ndarray,
     cell_palette: np.ndarray,
     cull_class: np.ndarray,
-    grid: np.ndarray,
+    occ: tuple[np.ndarray, tuple[int, int, int]],
     idx: np.ndarray,
 ) -> np.ndarray:
     """Alive mask after neighbor culling; no-cullface rows always alive."""
@@ -577,7 +580,7 @@ def _cull_alive(
     if len(rows) == 0:
         return mask
     nb = cells[rows] + _TIER_NORMALS[cull[rows].astype(np.int64)]
-    sx, sy, sz = grid.shape
+    sx, sy, sz = idx.shape
     valid = (
         (nb[..., 0] >= 0) & (nb[..., 0] < sx)
         & (nb[..., 1] >= 0) & (nb[..., 1] < sy)
@@ -591,7 +594,20 @@ def _cull_alive(
         ],
         axis=1,
     )
-    occluded = grid[nb_clipped[..., 0], nb_clipped[..., 1], nb_clipped[..., 2]]
+    flat, (st_x, st_y, st_z) = occ
+    nb_pad = np.stack(
+        [
+            np.clip(nb[..., 0], -1, sx + 1),
+            np.clip(nb[..., 1], -1, sy + 1),
+            np.clip(nb[..., 2], -1, sz + 1),
+        ],
+        axis=1,
+    )
+    occluded = flat[
+        (nb_pad[..., 0] + 1) * st_x
+        + (nb_pad[..., 1] + 1) * st_y
+        + (nb_pad[..., 2] + 1) * st_z
+    ]
     neighbor_pi = idx[nb_clipped[..., 0], nb_clipped[..., 1], nb_clipped[..., 2]]
     own = cull_class[cell_palette[rows]]
     pair = (
@@ -626,16 +642,19 @@ def _rotate_vertices(vtx: np.ndarray, yaw: int) -> np.ndarray:
 
 
 def _vertex_ao(
-    quads: np.ndarray, cells: np.ndarray, grid: np.ndarray
+    quads: np.ndarray,
+    cells: np.ndarray,
+    flat: np.ndarray,
+    strides: tuple[int, int, int],
 ) -> np.ndarray:
-    """Per-vertex AO multipliers from the region occlusion grid."""
+    """Per-vertex AO multipliers from the padded flat occlusion grid."""
     tier = quads["shade"].astype(np.int64)
     axes = _TIER_AXES[tier]
     normals = _TIER_NORMALS[tier]
-    e1 = np.zeros((len(tier), 3), np.int64)
-    e1[np.arange(len(tier)), axes[:, 1]] = 1
-    e2 = np.zeros((len(tier), 3), np.int64)
-    e2[np.arange(len(tier)), axes[:, 2]] = 1
+    st_x, st_y, st_z = strides
+    steps = np.array([st_x, st_y, st_z], np.int64)
+    t1 = steps[axes[:, 1]]
+    t2 = steps[axes[:, 2]]
     vtx = quads["vtx"]
     pick1 = axes[:, 1][:, None, None]
     pick2 = axes[:, 2][:, None, None]
@@ -645,26 +664,19 @@ def _vertex_ao(
     s2 = np.sign(np.take_along_axis(vtx, pick2, axis=2)[:, :, 0] - 8.0)
     s1 = s1.astype(np.int64)
     s2 = s2.astype(np.int64)
-    base = cells[:, None, :] + normals[:, None, :]
-    d1 = s1[:, :, None] * e1[:, None, :]
-    d2 = s2[:, :, None] * e2[:, None, :]
-    side1 = _grid_lookup(grid, base + d1).astype(np.int64)
-    side2 = _grid_lookup(grid, base + d2).astype(np.int64)
-    corner = _grid_lookup(grid, base + d1 + d2).astype(np.int64)
+    cells32 = cells.astype(np.int32)
+    base = (
+        (cells32[:, 0] + 1) * np.int32(st_x)
+        + (cells32[:, 1] + 1) * np.int32(st_y)
+        + (cells32[:, 2] + 1) * np.int32(st_z)
+        + normals[:, 0] * np.int32(st_x)
+        + normals[:, 1] * np.int32(st_y)
+        + normals[:, 2] * np.int32(st_z)
+    )[:, None]
+    side1 = flat[base + s1 * t1[:, None]].astype(np.int64)
+    side2 = flat[base + s2 * t2[:, None]].astype(np.int64)
+    corner = flat[base + s1 * t1[:, None] + s2 * t2[:, None]].astype(np.int64)
     level = np.where(side1 & side2, 0, 3 - (side1 + side2 + corner))
     ao = np.asarray(AO_LEVELS, np.float32)[level]
     ao[quads["dbl"]] = 1.0
     return ao
-
-
-def _grid_lookup(grid: np.ndarray, cells: np.ndarray) -> np.ndarray:
-    """Sample the occlusion grid; cells outside the region never occlude."""
-    sx, sy, sz = grid.shape
-    x = cells[..., 0]
-    y = cells[..., 1]
-    z = cells[..., 2]
-    valid = (x >= 0) & (x < sx) & (y >= 0) & (y < sy) & (z >= 0) & (z < sz)
-    out = np.zeros(cells.shape[:-1], bool)
-    if valid.any():
-        out[valid] = grid[x[valid], y[valid], z[valid]]
-    return out

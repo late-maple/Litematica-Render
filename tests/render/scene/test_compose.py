@@ -19,6 +19,7 @@ from litematic.render.scene.isometric import (
     _MAGENTA_TEXKEY,
     _backfill_builtin,
     _compose,
+    _vertex_ao,
 )
 from litematic.render.shapes import builtin_quads
 
@@ -768,3 +769,122 @@ def test_region_boundary_never_culls():
     scene = _row_scene(entries, "minecraft:ice", "minecraft:ice")
     # The right cell's east face points out of the region: kept.
     assert (1, 0, 0, TIER_EAST) in _cell_tiers(scene)
+
+
+def test_boundary_opaque_face_survives_outward_cullface():
+    # An occluding block at the region edge must not cull its outward
+    # face against itself (out-of-region neighbors are air, not itself).
+    entries = {"minecraft:stone": ("block/stone", True)}
+    schem = loads(
+        build_litematic_bytes(
+            [
+                {
+                    "name": "Main",
+                    "position": (0, 0, 0),
+                    "size": (1, 1, 1),
+                    "palette": [("minecraft:air", {}), ("minecraft:stone", {})],
+                    "indices_yzx": np.array([1], dtype=np.uint16),
+                }
+            ]
+        )
+    )
+    scene = _compose(schem, 0, _pair_pack(entries))
+    tiers = _cell_tiers(scene)
+    assert (0, 0, 0, TIER_EAST) in tiers
+    assert (0, 0, 0, TIER_UP) in tiers
+    assert (0, 0, 0, TIER_SOUTH) in tiers
+
+
+# AO lookups go through a False-padded flat grid with int32 index math;
+# the padded form must equal the classic masked 3D lookup everywhere.
+
+
+def _reference_ao(quads, cells, grid):
+    """The classic masked 3D-grid AO formula, kept as the oracle."""
+    from litematic.render.quads import AO_LEVELS
+    from litematic.render.scene.isometric import _TIER_AXES, _TIER_NORMALS
+
+    def lookup(points):
+        sx, sy, sz = grid.shape
+        x, y, z = points[..., 0], points[..., 1], points[..., 2]
+        valid = (
+            (x >= 0) & (x < sx) & (y >= 0) & (y < sy) & (z >= 0) & (z < sz)
+        )
+        out = np.zeros(points.shape[:-1], bool)
+        if valid.any():
+            out[valid] = grid[x[valid], y[valid], z[valid]]
+        return out
+
+    tier = quads["shade"].astype(np.int64)
+    axes = _TIER_AXES[tier]
+    normals = _TIER_NORMALS[tier]
+    e1 = np.zeros((len(tier), 3), np.int64)
+    e1[np.arange(len(tier)), axes[:, 1]] = 1
+    e2 = np.zeros((len(tier), 3), np.int64)
+    e2[np.arange(len(tier)), axes[:, 2]] = 1
+    vtx = quads["vtx"]
+    pick1 = axes[:, 1][:, None, None]
+    pick2 = axes[:, 2][:, None, None]
+    s1 = np.sign(np.take_along_axis(vtx, pick1, axis=2)[:, :, 0] - 8.0)
+    s2 = np.sign(np.take_along_axis(vtx, pick2, axis=2)[:, :, 0] - 8.0)
+    s1 = s1.astype(np.int64)
+    s2 = s2.astype(np.int64)
+    base = cells[:, None, :] + normals[:, None, :]
+    d1 = s1[:, :, None] * e1[:, None, :]
+    d2 = s2[:, :, None] * e2[:, None, :]
+    side1 = lookup(base + d1).astype(np.int64)
+    side2 = lookup(base + d2).astype(np.int64)
+    corner = lookup(base + d1 + d2).astype(np.int64)
+    level = np.where(side1 & side2, 0, 3 - (side1 + side2 + corner))
+    ao = np.asarray(AO_LEVELS, np.float32)[level]
+    ao[quads["dbl"]] = 1.0
+    return ao
+
+
+def _pad_flat(grid):
+    padded = np.pad(grid, 1)
+    strides = ((grid.shape[1] + 2) * (grid.shape[2] + 2), grid.shape[2] + 2, 1)
+    return padded.ravel(), strides
+
+
+def test_padded_ao_equals_reference():
+    rng = np.random.default_rng(7)
+    grid = rng.random((5, 4, 6)) < 0.4
+    flat, strides = _pad_flat(grid)
+    quads = np.empty(24, QUAD_DTYPE)
+    quads["shade"] = np.tile(np.arange(6, dtype=np.uint8), 4)
+    quads["vtx"] = np.tile(
+        np.array([[0, 0, 0], [0, 8, 0], [0, 8, 16], [0, 0, 16]], np.float32),
+        (24, 1, 1),
+    )
+    quads["dbl"] = np.zeros(24, bool)
+    quads["dbl"][3] = True  # a double-sided row short-circuits to 1.0
+    cells = np.stack(
+        [rng.integers(0, 5, 24), rng.integers(0, 4, 24), rng.integers(0, 6, 24)],
+        axis=1,
+    )
+    cells[0] = (0, 0, 0)
+    cells[1] = (4, 3, 5)
+    out = _vertex_ao(quads, cells, flat, strides)
+    assert out.dtype == np.float32
+    assert (out == _reference_ao(quads, cells, grid)).all()
+
+
+def test_ao_boundary_cells_match_reference():
+    grid = np.zeros((3, 3, 3), bool)
+    grid[0, :, :] = True
+    grid[:, 2, 1] = True
+    flat, strides = _pad_flat(grid)
+    quads = np.empty(8, QUAD_DTYPE)
+    quads["shade"] = np.array([1, 2, 3, 4, 5, 0, 1, 2], np.uint8)
+    quads["vtx"] = np.tile(
+        np.array([[0, 0, 0], [0, 8, 0], [0, 8, 16], [0, 0, 16]], np.float32),
+        (8, 1, 1),
+    )
+    quads["dbl"] = np.zeros(8, bool)
+    cells = np.array(
+        [(0, 0, 0), (2, 2, 2), (0, 2, 1), (1, 0, 2),
+         (2, 1, 0), (0, 1, 1), (1, 2, 0), (2, 0, 1)], np.int64
+    )
+    out = _vertex_ao(quads, cells, flat, strides)
+    assert (out == _reference_ao(quads, cells, grid)).all()
