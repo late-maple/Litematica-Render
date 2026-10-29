@@ -40,12 +40,16 @@ def _paint_inner(
     if len(scene.x) == 0:
         return canvas
     _assert_parallelograms(scene)
-    textures = _texture_stack(scene)
+    stacks, group_ids, slot_ids = _texture_stack(scene)
+    quad_group = group_ids[scene.texkey_ids]
+    quad_slot = slot_ids[scene.texkey_ids]
     sx, sy = _project(scene, t)
     depth = _depth(scene)
     for value in np.unique(depth):
         layer = np.nonzero(depth == value)[0]
-        _paint_layer(canvas, scene, layer, sx, sy, textures)
+        _paint_layer(
+            canvas, scene, layer, sx, sy, stacks, quad_group, quad_slot
+        )
     return canvas
 
 
@@ -60,14 +64,29 @@ def _assert_parallelograms(scene: _Scene) -> None:
         )
 
 
-def _texture_stack(scene: _Scene) -> np.ndarray:
-    """Stack the scene texkey arrays into one (K, 16, 16, 4) lookup table."""
+def _texture_stack(
+    scene: _Scene,
+) -> tuple[list[np.ndarray], np.ndarray, np.ndarray]:
+    """Group scene textures by (h, w) into sorted stacks plus lookup ids."""
     arrays = list(scene.texkeys.values())
     if scene.texkey_ids.size and int(scene.texkey_ids.max()) >= len(arrays):
         raise RenderError("paint: texkey id outside the scene texture table")
     if not arrays:
-        return np.zeros((0, 16, 16, 4), np.uint8)
-    return np.stack(arrays)
+        return [], np.zeros(0, np.int8), np.zeros(0, np.int64)
+    shapes = sorted({arr.shape[:2] for arr in arrays})
+    stacks = [
+        np.stack([a for a in arrays if a.shape[:2] == shape])
+        for shape in shapes
+    ]
+    group_ids = np.zeros(len(arrays), np.int8)
+    slot_ids = np.zeros(len(arrays), np.int64)
+    for gid, shape in enumerate(shapes):
+        for slot, index in enumerate(
+            i for i, a in enumerate(arrays) if a.shape[:2] == shape
+        ):
+            group_ids[index] = gid
+            slot_ids[index] = slot
+    return stacks, group_ids, slot_ids
 
 
 def _project(scene: _Scene, t: int) -> tuple[np.ndarray, np.ndarray]:
@@ -101,15 +120,38 @@ def _paint_layer(
     layer: np.ndarray,
     sx: np.ndarray,
     sy: np.ndarray,
-    textures: np.ndarray,
+    stacks: list[np.ndarray],
+    quad_group: np.ndarray,
+    quad_slot: np.ndarray,
 ) -> None:
-    """Rasterize one depth layer: cover writes first, then alpha blends."""
+    """Rasterize one depth layer group by group: covers first, then blends."""
+    layer_groups = quad_group[layer]
+    for gid, stack in enumerate(stacks):
+        sub = layer[layer_groups == gid]
+        if len(sub) == 0:
+            continue
+        _paint_group(
+            canvas, scene, sub, sx, sy, stack, quad_slot, stack.shape[1:3]
+        )
+
+
+def _paint_group(
+    canvas: np.ndarray,
+    scene: _Scene,
+    layer: np.ndarray,
+    sx: np.ndarray,
+    sy: np.ndarray,
+    textures: np.ndarray,
+    quad_slot: np.ndarray,
+    tex_hw: tuple[int, int],
+) -> None:
+    """Rasterize one depth layer restricted to a single texture shape."""
     quad_sx = sx[layer]
     quad_sy = sy[layer]
     uv = scene.quad_uv[layer].astype(np.float64)
     ao = scene.quad_ao[layer].astype(np.float64)
     shade = scene.quad_shade[layer]
-    tex = textures[scene.texkey_ids[layer]]
+    tex = textures[quad_slot[layer]]
     dbl = np.nonzero(scene.quad_dbl[layer])[0]
     if len(dbl):
         # Double-sided quads paint both windings in the same layer.
@@ -120,7 +162,15 @@ def _paint_layer(
         shade = np.concatenate([shade, shade[dbl]])
         tex = np.concatenate([tex, tex[dbl]])
     rows, cols, values = _rasterize(
-        quad_sx, quad_sy, uv, ao, shade, tex, canvas.shape[0], canvas.shape[1]
+        quad_sx,
+        quad_sy,
+        uv,
+        ao,
+        shade,
+        tex,
+        tex_hw,
+        canvas.shape[0],
+        canvas.shape[1],
     )
     alpha = values[:, 3]
     cover = alpha >= _COVER_ALPHA
@@ -137,6 +187,7 @@ def _rasterize(
     ao: np.ndarray,
     shade: np.ndarray,
     tex: np.ndarray,
+    tex_hw: tuple[int, int],
     height: int,
     width: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -174,6 +225,7 @@ def _rasterize(
         ao,
         shade,
         tex,
+        tex_hw,
     )
 
 
@@ -218,6 +270,7 @@ def _shade_pixels(
     ao: np.ndarray,
     shade: np.ndarray,
     tex: np.ndarray,
+    tex_hw: tuple[int, int],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Gather texels, apply face light times bilinear AO, and return RGBA."""
     du = u * (uv[quad, 1, 0] - uv[quad, 0, 0]) + v * (
@@ -226,10 +279,14 @@ def _shade_pixels(
     dv = u * (uv[quad, 1, 1] - uv[quad, 0, 1]) + v * (
         uv[quad, 3, 1] - uv[quad, 0, 1]
     )
-    # uv corners live in 0..16 texel space, so the interpolated value is
-    # already the texel coordinate: floor and clip straight to 0..15.
-    tx = np.clip(np.floor(uv[quad, 0, 0] + du), 0, 15).astype(np.int64)
-    ty = np.clip(np.floor(uv[quad, 0, 1] + dv), 0, 15).astype(np.int64)
+    # Scale 0..16 uv space to the texture's native size; clip, no wrap.
+    tex_h, tex_w = tex_hw
+    tx = np.clip(
+        np.floor((uv[quad, 0, 0] + du) * (tex_w / 16.0)), 0, tex_w - 1
+    ).astype(np.int64)
+    ty = np.clip(
+        np.floor((uv[quad, 0, 1] + dv) * (tex_h / 16.0)), 0, tex_h - 1
+    ).astype(np.int64)
     brightness = _LIGHT[shade[quad]] * (
         ao[quad, 0]
         + u * (ao[quad, 1] - ao[quad, 0])

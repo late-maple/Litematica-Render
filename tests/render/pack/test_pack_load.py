@@ -15,9 +15,9 @@ from litematic.render.pack import loader as pack_mod
 from litematic.render.quads import TIER_EAST, TIER_SOUTH, TIER_UP, unit_cube_quads
 
 
-def _png(color):
+def _png(color, size=(16, 16)):
     buf = io.BytesIO()
-    Image.new("RGBA", (16, 16), (*color, 255)).save(buf, "PNG")
+    Image.new("RGBA", size, (*color, 255)).save(buf, "PNG")
     return buf.getvalue()
 
 
@@ -59,7 +59,7 @@ def test_first_load_extracts_and_caches(tmp_path):
     pack_file = _mini_pack(tmp_path / "pack.zip")
     textures = load_pack(pack_file)
     assert isinstance(textures, Textures)
-    assert textures.version == "pack-quads.3"
+    assert textures.version == "pack-quads.4"
     assert (tmp_path / "pack.litematic-tex.npz").is_file()
     quads = textures.quads("minecraft:stone", {})
     assert quads is not None
@@ -258,7 +258,7 @@ def test_two_arg_extract_produces_loadable_cache(tmp_path):
     extract_mod._extract_pack(pack_file, dest)
     parsed = pack_mod._parse_textures(dest)
     assert parsed is not None
-    assert parsed.version == "pack-quads.3"
+    assert parsed.version == "pack-quads.4"
 
 
 def test_old_cache_version_rebuilds(tmp_path):
@@ -275,7 +275,7 @@ def test_old_cache_version_rebuilds(tmp_path):
     finally:
         pack_mod._extract_pack = counter.real
     assert counter.calls == 1
-    assert textures.version == "pack-quads.3"
+    assert textures.version == "pack-quads.4"
     assert textures.quads("minecraft:stone", {}) is not None
 
 
@@ -447,3 +447,35 @@ def test_multipart_malformed_when_matches_nothing(tmp_path):
     quads = textures.quads("minecraft:thing", {"facing": "north"})
     assert quads is not None
     assert len(quads) == 6
+
+
+def test_native_shape_cache_accepted(tmp_path):
+    """tex/ arrays of any (h, w, 4) uint8 shape load through unchanged."""
+    pack_file = _mini_pack(tmp_path / "pack.zip")
+    load_pack(pack_file)
+    cache = tmp_path / "pack.litematic-tex.npz"
+    data = dict(np.load(cache, allow_pickle=False))
+    data["tex/block/wide"] = np.zeros((8, 32, 4), np.uint8)
+    np.savez(cache, **data)
+    textures = load_pack(pack_file)
+    assert textures.arrays["block/wide"].shape == (8, 32, 4)
+
+
+def test_native_texture_pack_renders_quads(tmp_path):
+    """A 32x32 pack texture flows through load_pack into usable quads."""
+    faces = {n: {"texture": "block/stone"} for n in _FACE_NAMES}
+    entries = {
+        "assets/minecraft/blockstates/stone.json": json.dumps(
+            {"variants": {"": {"model": "block/stone"}}}
+        ),
+        "assets/minecraft/models/block/stone.json": json.dumps(
+            {"elements": [{"from": [0, 0, 0], "to": [16, 16, 16], "faces": faces}]}
+        ),
+        "assets/minecraft/textures/block/stone.png": _png((1, 2, 3), size=(32, 32)),
+    }
+    with zipfile.ZipFile(tmp_path / "p.zip", "w") as zf:
+        for name, blob in entries.items():
+            zf.writestr(name, blob)
+    textures = load_pack(tmp_path / "p.zip")
+    assert textures.arrays["block/stone"].shape == (32, 32, 4)
+    assert textures.quads("minecraft:stone", {}) is not None

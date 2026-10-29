@@ -19,7 +19,6 @@ from litematic.render.pack.extract import (
     _CacheWriteError,
     _extract_pack,
 )
-from litematic.render.pack.texture import _TEX_SIZE
 from litematic.render.quads import QUAD_DTYPE, redstone_tint
 
 __all__ = ["Textures", "load_pack"]
@@ -198,9 +197,13 @@ def _parse_textures(path: Path) -> Textures | None:
             for key in data.files:
                 if key.startswith("tex/"):
                     array = data[key]
-                    if array.shape == (_TEX_SIZE, _TEX_SIZE, 4):
-                        if array.dtype == np.uint8:
-                            arrays[key[len("tex/") :]] = array
+                    if (
+                        array.ndim == 3
+                        and array.shape[2] == 4
+                        and min(array.shape[:2]) >= 1
+                        and array.dtype == np.uint8
+                    ):
+                        arrays[key[len("tex/") :]] = array
                 elif key.startswith("quads/"):
                     array = data[key]
                     if array.ndim == 1 and array.dtype == QUAD_DTYPE:

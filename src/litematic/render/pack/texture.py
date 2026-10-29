@@ -20,7 +20,27 @@ _VEC = {
 }
 _NAME = {v: k for k, v in _VEC.items()}
 
-_TEX_SIZE = 16
+
+
+class _Budget:
+    """Reject oversize or over-budget pack textures as missing."""
+
+    MAX_SIDE = 2048
+    MAX_BYTES = 256 * 1024 * 1024
+
+    def __init__(self) -> None:
+        self.bytes = 0
+
+    def take(self, shape: tuple[int, ...]) -> bool:
+        """Account one decoded texture's bytes; False when over a cap."""
+        height, width = int(shape[0]), int(shape[1])
+        if max(height, width) > self.MAX_SIDE:
+            return False
+        size = height * width * 4
+        if self.bytes + size > self.MAX_BYTES:
+            return False
+        self.bytes += size
+        return True
 
 
 
@@ -170,6 +190,7 @@ def _load_texture(
     tex_ref: str,
     tex_key: str,
     cache: dict[str, np.ndarray | None],
+    budget: _Budget,
 ) -> np.ndarray | None:
     if tex_key in cache:
         return cache[tex_key]
@@ -177,8 +198,10 @@ def _load_texture(
     result: np.ndarray | None = None
     if file is not None and file in names:
         try:
-            image = _decode_png(archive.read(file))
-            result = np.asarray(image, dtype=np.uint8)
+            image = _decode_png(archive.read(file), _is_animated(archive, names, file))
+            raw = np.asarray(image, dtype=np.uint8)
+            if budget.take(raw.shape):
+                result = raw
         except RenderError:
             raise
         except Exception:
@@ -188,16 +211,29 @@ def _load_texture(
 
 
 
-def _decode_png(data: bytes) -> Any:
+def _is_animated(
+    archive: zipfile.ZipFile, names: set[str], file: str
+) -> bool:
+    """True when the texture's .mcmeta declares a vanilla animation."""
+    meta = f"{file}.mcmeta"
+    if meta not in names:
+        return False
+    try:
+        parsed = json.loads(archive.read(meta))
+    except Exception:
+        return False
+    return isinstance(parsed, dict) and "animation" in parsed
+
+
+
+def _decode_png(data: bytes, animated: bool) -> Any:
     from PIL import Image
 
     image = Image.open(io.BytesIO(data)).convert("RGBA")
-    width, height = image.size
-    if width != height:  # animation strip: first frame
+    if animated:  # vertical strip: first frame only
+        width, height = image.size
         side = min(width, height)
         image = image.crop((0, 0, side, side))
-    if image.size != (_TEX_SIZE, _TEX_SIZE):
-        image = image.resize((_TEX_SIZE, _TEX_SIZE), Image.Resampling.BOX)
     return image
 
 
@@ -246,6 +282,7 @@ def _first_model_texture(
     model_refs: list[str],
     model_cache: dict[str, dict[str, Any] | None],
     texture_cache: dict[str, np.ndarray | None],
+    budget: _Budget,
 ) -> np.ndarray | None:
     """First loadable concrete texture among the referenced models."""
     for ref in model_refs:
@@ -263,6 +300,7 @@ def _first_model_texture(
                 tex_ref,
                 _texture_key(tex_ref, ns),
                 texture_cache,
+                budget,
             )
             if raw is not None:
                 return raw
@@ -279,6 +317,7 @@ def _register_builtin_texture(
     model_cache: dict[str, dict[str, Any] | None],
     texture_cache: dict[str, np.ndarray | None],
     tex_arrays: dict[str, np.ndarray],
+    budget: _Budget,
 ) -> None:
     """Register the builtin layer texture under the block's canonical key.
 
@@ -286,13 +325,13 @@ def _register_builtin_texture(
     textures/block/<stem>.png; unresolved blocks stay for magenta.
     """
     raw = _first_model_texture(
-        archive, names, ns, model_refs, model_cache, texture_cache
+        archive, names, ns, model_refs, model_cache, texture_cache, budget
     )
     stem = block_id.partition(":")[2]
     tex_key = _texture_key(f"block/{stem}", ns)
     if raw is None:
         raw = _load_texture(
-            archive, names, ns, f"block/{stem}", tex_key, texture_cache
+            archive, names, ns, f"block/{stem}", tex_key, texture_cache, budget
         )
     if raw is None:
         return
@@ -315,11 +354,14 @@ def _register_wire_dust(
     ns: str,
     texture_cache: dict[str, np.ndarray | None],
     tex_arrays: dict[str, np.ndarray],
+    budget: _Budget,
 ) -> None:
     """Register power-tinted dust textures for the builtin wire family."""
     for ref in _WIRE_DUST_TEXTURES:
         tex_key = _texture_key(ref, ns)
-        raw = _load_texture(archive, names, ns, ref, tex_key, texture_cache)
+        raw = _load_texture(
+            archive, names, ns, ref, tex_key, texture_cache, budget
+        )
         if raw is None:
             continue
         for power in range(16):

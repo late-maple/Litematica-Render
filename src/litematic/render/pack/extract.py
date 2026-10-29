@@ -17,6 +17,7 @@ from litematic.render.pack.elements import (
 from litematic.render.pack.entities import chest_quads
 from litematic.render.pack.texture import (
     _apply_tint,
+    _Budget,
     _cached_model,
     _load_texture,
     _register_builtin_texture,
@@ -51,7 +52,7 @@ _FIXED_DATE = (1980, 1, 1, 0, 0, 0)
 
 
 
-_NPZ_VERSION = "pack-quads.3"
+_NPZ_VERSION = "pack-quads.4"
 
 
 
@@ -98,6 +99,7 @@ def _extract_pack(
             )
         _require_pillow()
         texture_cache: dict[str, np.ndarray | None] = {}
+        budget = _Budget()
         model_cache: dict[str, dict[str, Any] | None] = {}
         mquad_cache: dict[str, str | None] = {}
         tex_arrays: dict[str, np.ndarray] = {}
@@ -121,6 +123,7 @@ def _extract_pack(
                     tex_arrays,
                     mquad_cache,
                     mquad_map,
+                    budget,
                 )
             except RenderError:
                 raise
@@ -145,7 +148,7 @@ def _extract_pack(
                 # below; their unmatched states stay for magenta.
                 continue
             array_key = _fallback_array_key(
-                archive, names, ns, stem, texture_cache, tex_arrays
+                archive, names, ns, stem, texture_cache, tex_arrays, budget
             )
             if array_key is None:
                 continue
@@ -167,7 +170,9 @@ def _extract_pack(
             if name.startswith("assets/") and len(name.split("/")) > 2
         }
         for ns in sorted(asset_ns):
-            _register_wire_dust(archive, names, ns, texture_cache, tex_arrays)
+            _register_wire_dust(
+                archive, names, ns, texture_cache, tex_arrays, budget
+            )
     _write_npz(
         Path(dest), tex_arrays, quad_map, occl_map, parts_map, mquad_map,
         pack_mtime,
@@ -206,11 +211,14 @@ def _fallback_array_key(
     stem: str,
     texture_cache: dict[str, np.ndarray | None],
     tex_arrays: dict[str, np.ndarray],
+    budget: _Budget,
 ) -> str | None:
     """Resolve a textures/block/<stem>.png fallback into an array key."""
     tex_ref = f"block/{stem}"
     tex_key = _texture_key(tex_ref, ns)
-    raw = _load_texture(archive, names, ns, tex_ref, tex_key, texture_cache)
+    raw = _load_texture(
+        archive, names, ns, tex_ref, tex_key, texture_cache, budget
+    )
     if raw is None:
         return None
     tint = _tint_for(f"{ns}:{stem}", "")
@@ -228,6 +236,7 @@ def _extract_block(
     tex_arrays: dict[str, np.ndarray],
     mquad_cache: dict[str, str | None],
     mquad_out: dict[str, np.ndarray],
+    budget: _Budget,
 ) -> tuple[dict[str, tuple[np.ndarray, bool]], str | None]:
     """Extract variant quads plus the block's multipart part records."""
     state = json.loads(archive.read(state_name))
@@ -253,6 +262,7 @@ def _extract_block(
                 y_rot,
                 texture_cache,
                 tex_arrays,
+                budget,
             )
             if compiled is not None:
                 quads.append(compiled)
@@ -273,9 +283,10 @@ def _extract_block(
         tex_arrays,
         mquad_cache,
         mquad_out,
+        budget,
     )
     expanded = _chest_states(
-        archive, names, ns, block_id, texture_cache, tex_arrays
+        archive, names, ns, block_id, texture_cache, tex_arrays, budget
     )
     if expanded:
         # The expanded facing/type states supersede variant stubs: a stub
@@ -287,7 +298,7 @@ def _extract_block(
         # builtin step can backfill it under the canonical block key.
         _register_builtin_texture(
             archive, names, ns, block_id, model_refs, model_cache,
-            texture_cache, tex_arrays,
+            texture_cache, tex_arrays, budget,
         )
     return result, parts_json
 
@@ -303,6 +314,7 @@ def _extract_parts(
     tex_arrays: dict[str, np.ndarray],
     mquad_cache: dict[str, str | None],
     mquad_out: dict[str, np.ndarray],
+    budget: _Budget,
 ) -> str | None:
     """Compile multipart part records into lazily evaluated npz entries.
 
@@ -327,6 +339,7 @@ def _extract_parts(
             tex_arrays,
             mquad_cache,
             mquad_out,
+            budget,
         )
         if subkey is not None:
             records.append({"when": part["when"], "quads": subkey})
@@ -367,6 +380,7 @@ def _model_quads_key(
     tex_arrays: dict[str, np.ndarray],
     mquad_cache: dict[str, str | None],
     mquad_out: dict[str, np.ndarray],
+    budget: _Budget,
 ) -> str | None:
     """Compile one part model's quads once, keyed by (ns, ref, rotation)."""
     cache_key = f"{ns}|{ref}|x{x_rot}|y{y_rot}"
@@ -391,6 +405,7 @@ def _model_quads_key(
                     "",
                     texture_cache,
                     tex_arrays,
+                    budget,
                 )
 
             quads = _compile_elements(
@@ -403,7 +418,15 @@ def _model_quads_key(
             )
         else:
             quads = _stub_quads(
-                archive, names, ns, model, block_id, "", texture_cache, tex_arrays
+                archive,
+                names,
+                ns,
+                model,
+                block_id,
+                "",
+                texture_cache,
+                tex_arrays,
+                budget,
             )
     if quads is None or not len(quads):
         mquad_cache[cache_key] = None
@@ -425,6 +448,7 @@ def _variant_quads(
     y_rot: int,
     texture_cache: dict[str, np.ndarray | None],
     tex_arrays: dict[str, np.ndarray],
+    budget: _Budget,
 ) -> np.ndarray | None:
     """Compile one variant's quads: element boxes, else a stub unit cube."""
     if model["elements"] is None:
@@ -433,7 +457,15 @@ def _variant_quads(
             # no pack geometry: defer to the builtin shape table.
             return None
         return _stub_quads(
-            archive, names, ns, model, block_id, state_key, texture_cache, tex_arrays
+            archive,
+            names,
+            ns,
+            model,
+            block_id,
+            state_key,
+            texture_cache,
+            tex_arrays,
+            budget,
         )
 
     def texkey_for(
@@ -449,6 +481,7 @@ def _variant_quads(
             state_key,
             texture_cache,
             tex_arrays,
+            budget,
         )
 
     return _compile_elements(
@@ -472,6 +505,7 @@ def _chest_states(
     block_id: str,
     texture_cache: dict[str, np.ndarray | None],
     tex_arrays: dict[str, np.ndarray],
+    budget: _Budget,
 ) -> dict[str, tuple[np.ndarray, bool]]:
     """Expand an element-less chest-family block into facing/type states.
 
@@ -483,7 +517,9 @@ def _chest_states(
 
     def resolve(tex_ref: str) -> str | None:
         tex_key = _texture_key(tex_ref, ns)
-        raw = _load_texture(archive, names, ns, tex_ref, tex_key, texture_cache)
+        raw = _load_texture(
+            archive, names, ns, tex_ref, tex_key, texture_cache, budget
+        )
         if raw is None:
             return None
         return _register_array(raw, tex_key, None, tex_arrays)
@@ -509,6 +545,7 @@ def _element_texkey(
     state_key: str,
     texture_cache: dict[str, np.ndarray | None],
     tex_arrays: dict[str, np.ndarray],
+    budget: _Budget,
 ) -> str | None:
     """Resolve one element face's texture ref into a tex array key."""
     tex_ref = _resolve_ref(face.get("texture"), textures)
@@ -524,6 +561,7 @@ def _element_texkey(
         state_key,
         texture_cache,
         tex_arrays,
+        budget,
     )
 
 
@@ -538,10 +576,13 @@ def _ref_array_key(
     state_key: str,
     texture_cache: dict[str, np.ndarray | None],
     tex_arrays: dict[str, np.ndarray],
+    budget: _Budget,
 ) -> str | None:
     """Load a texture ref and register its raw or tinted array key."""
     tex_key = _texture_key(tex_ref, ns)
-    raw = _load_texture(archive, names, ns, tex_ref, tex_key, texture_cache)
+    raw = _load_texture(
+        archive, names, ns, tex_ref, tex_key, texture_cache, budget
+    )
     if raw is None:
         return None
     tint = _tint_for(block_id, state_key) if tinted else None
@@ -575,6 +616,7 @@ def _stub_quads(
     state_key: str,
     texture_cache: dict[str, np.ndarray | None],
     tex_arrays: dict[str, np.ndarray],
+    budget: _Budget,
 ) -> np.ndarray | None:
     """Build unit-cube quads from an element-less model's first texture."""
     array_key = _ref_array_key(
@@ -587,6 +629,7 @@ def _stub_quads(
         state_key,
         texture_cache,
         tex_arrays,
+        budget,
     )
     if array_key is None:
         return None

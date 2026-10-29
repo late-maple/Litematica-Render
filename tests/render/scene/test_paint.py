@@ -311,3 +311,54 @@ def test_enclosed_pack_miss_paints_nothing():
     }
     flat = {tuple(px) for px in img.reshape(-1, 4).tolist() if px[3]}
     assert not (flat & magenta)
+
+
+# Native-resolution sampling: per-shape groups; 16x16 stays byte-identical.
+
+
+def _split_texture(width, height, left, right):
+    """Two vertical halves: left color columns, right color columns."""
+    tex = np.zeros((height, width, 4), np.uint8)
+    tex[:, : width // 2] = left
+    tex[:, width // 2 :] = right
+    return tex
+
+
+def test_native_texel_split_texture_visible():
+    tex = _split_texture(
+        32, 32, (255, 0, 0, 255), (0, 0, 255, 255)
+    )
+    textures = _textures({"minecraft:stone": tex})
+    img = _paint(_scene([("minecraft:stone", {}, 0, 0, 0)], textures), 4, _BG)
+    painted = {tuple(px) for px in img.reshape(-1, 4).tolist() if px[3]}
+    assert any(px[0] > px[2] for px in painted)  # left half red-family
+    assert any(px[2] > px[0] for px in painted)  # right half blue-family
+
+
+def test_rectangular_texture_sampled():
+    tex = _split_texture(
+        16, 8, (255, 0, 0, 255), (0, 0, 255, 255)
+    )
+    textures = _textures({"minecraft:stone": tex})
+    img = _paint(_scene([("minecraft:stone", {}, 0, 0, 0)], textures), 4, _BG)
+    painted = {tuple(px) for px in img.reshape(-1, 4).tolist() if px[3]}
+    assert any(px[0] > px[2] for px in painted)
+    assert any(px[2] > px[0] for px in painted)
+
+
+def test_mixed_shape_layer_deterministic():
+    textures = _textures(
+        {
+            "minecraft:stone": (255, 0, 0, 255),
+            "minecraft:glass": _split_texture(
+                32, 32, (0, 255, 0, 128), (0, 0, 255, 128)
+            ),
+        }
+    )
+    scene = _scene(
+        [("minecraft:stone", {}, 1, 0, 0), ("minecraft:glass", {}, 0, 1, 0)],
+        textures,
+    )
+    first = _paint(scene, 2, _BG)
+    second = _paint(scene, 2, _BG)
+    assert first.tobytes() == second.tobytes()

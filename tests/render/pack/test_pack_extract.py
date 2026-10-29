@@ -147,7 +147,7 @@ def test_plain_block_stateless_entry(tmp_path):
     assert summary.blocks == 1
     assert summary.skipped == 0
     data = _load_npz(dest)
-    assert data["meta/version"].item() == "pack-quads.3"
+    assert data["meta/version"].item() == "pack-quads.4"
     quads = data["quads/minecraft:stone[]"]
     assert quads.dtype == QUAD_DTYPE
     assert quads["texkey"].tolist() == ["block/stone"] * 6
@@ -326,18 +326,21 @@ def test_animation_strip_takes_first_frame(tmp_path):
     entries["assets/minecraft/textures/block/stone.png"] = _strip_png(
         (200, 0, 0, 255), (0, 0, 200, 255)
     )
+    entries["assets/minecraft/textures/block/stone.png.mcmeta"] = (
+        '{"animation":{"frametime":2}}'
+    )
     data = _load_npz(_extract(tmp_path, entries))
     assert (_tex(data, "block/stone") == (200, 0, 0, 255)).all()
 
 
-def test_oversize_texture_downsampled_to_16(tmp_path):
+def test_hi_res_quadrant_kept_native(tmp_path):
     entries = _stone_entries()
     entries["assets/minecraft/textures/block/stone.png"] = _quadrant_png()
     data = _load_npz(_extract(tmp_path, entries))
     tex = _tex(data, "block/stone")
-    assert tex.shape == (16, 16, 4)
+    assert tex.shape == (32, 32, 4)
     assert (tex[0, 0][:3] == (255, 0, 0)).all()
-    assert (tex[15, 15][:3] == (0, 255, 0)).all()
+    assert (tex[31, 31][:3] == (0, 255, 0)).all()
 
 
 def test_partial_face_model_emits_its_quads(tmp_path):
@@ -901,7 +904,7 @@ def test_face_geom_matches_unit_cube_quads():
 
 def test_npz_v3_roundtrip(tmp_path):
     data = _load_npz(_extract(tmp_path, _stone_entries()))
-    assert data["meta/version"].item() == "pack-quads.3"
+    assert data["meta/version"].item() == "pack-quads.4"
     assert "quads/minecraft:stone[]" in data.files
     assert "occl/minecraft:stone[]" in data.files
     quads = data["quads/minecraft:stone[]"]
@@ -1622,3 +1625,89 @@ def test_wire_multipart_enumerates_power_for_tint(tmp_path):
     assert [str(k) for k in mid["texkey"]] == ["block/wire@171,14,14"]
     zero = textures.quads("minecraft:redstone_wire", {"power": "0", "north": "none"})
     assert [str(k) for k in zero["texkey"]] == ["block/wire@76,0,0"]
+
+
+# Native-resolution textures: pack pixels reach the npz unsampled.
+
+
+def test_native_resolution_texture_preserved(tmp_path):
+    dest = _extract(tmp_path, _stone_entries(
+        **{"assets/minecraft/textures/block/stone.png":
+           _solid_png((200, 30, 30, 255), size=(32, 32))}
+    ))
+    data = _load_npz(dest)
+    tex = _tex(data, "block/stone")
+    assert tex.shape == (32, 32, 4)
+    assert tex.dtype == np.uint8
+
+
+def test_mcmeta_square_animation_first_frame(tmp_path):
+    entries = _stone_entries(
+        **{
+            "assets/minecraft/textures/block/stone.png": _strip_png(
+                (200, 30, 30, 255), (10, 200, 10, 255)
+            ),
+            "assets/minecraft/textures/block/stone.png.mcmeta":
+                '{"animation":{"frametime":2}}',
+        }
+    )
+    data = _load_npz(_extract(tmp_path, entries))
+    tex = _tex(data, "block/stone")
+    assert tex.shape == (16, 16, 4)
+    assert (tex == (200, 30, 30, 255)).all()
+
+
+def test_mcmeta_without_animation_key_kept_whole(tmp_path):
+    entries = _stone_entries(
+        **{
+            "assets/minecraft/textures/block/stone.png":
+                _solid_png((200, 30, 30, 255), size=(16, 8)),
+            "assets/minecraft/textures/block/stone.png.mcmeta":
+                '{"texture":{}}',
+        }
+    )
+    data = _load_npz(_extract(tmp_path, entries))
+    assert _tex(data, "block/stone").shape == (8, 16, 4)
+
+
+def test_non_square_non_animated_kept_whole(tmp_path):
+    entries = _stone_entries(
+        **{"assets/minecraft/textures/block/stone.png":
+           _solid_png((200, 30, 30, 255), size=(16, 8))}
+    )
+    data = _load_npz(_extract(tmp_path, entries))
+    tex = _tex(data, "block/stone")
+    assert tex.shape == (8, 16, 4)
+    assert (tex == (200, 30, 30, 255)).all()
+
+
+def test_oversize_side_rejected(tmp_path):
+    dest = _extract(tmp_path, _stone_entries(
+        **{"assets/minecraft/textures/block/stone.png":
+           _solid_png((200, 30, 30, 255), size=(2049, 64))}
+    ))
+    data = _load_npz(dest)
+    assert not any(key.startswith("tex/") for key in data.files)
+    assert not any(key.startswith("quads/") for key in data.files)
+
+
+def test_budget_exhaustion_skips_later_textures(tmp_path, monkeypatch):
+    from litematic.render.pack import texture as texture_mod
+
+    monkeypatch.setattr(texture_mod._Budget, "MAX_BYTES", 16 * 16 * 4)
+    entries = _stone_entries(
+        **{
+            "assets/minecraft/blockstates/b.json":
+                _blockstates("block/b"),
+            "assets/minecraft/models/block/b.json":
+                _model(_all_faces("block/b")),
+            "assets/minecraft/textures/block/b.png":
+                _solid_png((10, 200, 10, 255)),
+        }
+    )
+    dest = _extract(tmp_path, entries)
+    data = _load_npz(dest)
+    # Sorted state files extract "b" first; it claims the entire budget.
+    assert "tex/block/b" in data.files
+    assert "tex/block/stone" not in data.files
+    assert "quads/minecraft:stone[]" not in data.files

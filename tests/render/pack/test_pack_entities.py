@@ -170,11 +170,11 @@ def test_extract_emits_chest_quads(tmp_path):
     assert summary.blocks == 2
     assert summary.skipped == 0
     data = _load_npz(dest)
-    assert data["meta/version"].item() == "pack-quads.3"
+    assert data["meta/version"].item() == "pack-quads.4"
     quads = data["quads/minecraft:chest[facing=north,type=single]"]
     assert len(quads) == 18
     assert set(str(k) for k in quads["texkey"]) == {"entity/chest/normal"}
-    assert data["tex/entity/chest/normal"].shape == (16, 16, 4)
+    assert data["tex/entity/chest/normal"].shape == (64, 64, 4)
     expanded = [k for k in data.files if k.startswith("quads/minecraft:chest[")]
     assert len(expanded) == 12
 
