@@ -14,6 +14,7 @@ from litematic.render.pack.elements import (
     _compile_elements,
     _unit_cube_occl,
 )
+from litematic.render.pack.entities import chest_quads
 from litematic.render.pack.texture import (
     _apply_tint,
     _cached_model,
@@ -50,7 +51,7 @@ _FIXED_DATE = (1980, 1, 1, 0, 0, 0)
 
 
 
-_NPZ_VERSION = "pack-quads.2"
+_NPZ_VERSION = "pack-quads.3"
 
 
 
@@ -273,6 +274,13 @@ def _extract_block(
         mquad_cache,
         mquad_out,
     )
+    expanded = _chest_states(
+        archive, names, ns, block_id, texture_cache, tex_arrays
+    )
+    if expanded:
+        # The expanded facing/type states supersede variant stubs: a stub
+        # key with more property pairs would otherwise out-specify them.
+        result = expanded
     if not result and parts_json is None:
         # No pack geometry (missing models, builtin-cut chains): resolve
         # the builtin layer's texture per spec 5.3 so compose's state-aware
@@ -446,6 +454,48 @@ def _variant_quads(
     return _compile_elements(
         model["elements"], model["textures"], ns, x_rot, y_rot, texkey_for
     )
+
+
+
+_CHEST_STATE_KEYS = [
+    f"facing={facing},type={kind}"
+    for facing in ("north", "south", "east", "west")
+    for kind in ("single", "left", "right")
+]
+
+
+
+def _chest_states(
+    archive: zipfile.ZipFile,
+    names: set[str],
+    ns: str,
+    block_id: str,
+    texture_cache: dict[str, np.ndarray | None],
+    tex_arrays: dict[str, np.ndarray],
+) -> dict[str, tuple[np.ndarray, bool]]:
+    """Expand an element-less chest-family block into facing/type states.
+
+    Vanilla ships chest geometry only through the block-entity renderer:
+    the blockstate never enumerates facing/type variants (a bare empty
+    variant at best), so the entity textures carry the model and the state
+    domain is expanded here.
+    """
+
+    def resolve(tex_ref: str) -> str | None:
+        tex_key = _texture_key(tex_ref, ns)
+        raw = _load_texture(archive, names, ns, tex_ref, tex_key, texture_cache)
+        if raw is None:
+            return None
+        return _register_array(raw, tex_key, None, tex_arrays)
+
+    if chest_quads(block_id, "", resolve) is None:
+        return {}
+    states: dict[str, tuple[np.ndarray, bool]] = {}
+    for key in _CHEST_STATE_KEYS:
+        quads = chest_quads(block_id, key, resolve)
+        if quads is not None:
+            states[key] = (quads, False)
+    return states
 
 
 

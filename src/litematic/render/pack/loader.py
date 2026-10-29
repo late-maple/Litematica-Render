@@ -9,7 +9,11 @@ from typing import NamedTuple
 import numpy as np
 
 from litematic.render.errors import RenderError
-from litematic.render.pack.blockstate import _normalize_state_key, _when_matches
+from litematic.render.pack.blockstate import (
+    _normalize_state_key,
+    _state_pairs,
+    _when_matches,
+)
 from litematic.render.pack.extract import (
     _NPZ_VERSION,
     _CacheWriteError,
@@ -140,15 +144,6 @@ def _state_index(
         index.setdefault(block, {})[state[:-1]] = _state_pairs(state[:-1])
     return index
 
-
-def _state_pairs(state_key: str) -> dict[str, str]:
-    """Parse a state key into its property pairs; the empty key is {}."""
-    pairs: dict[str, str] = {}
-    for part in state_key.split(","):
-        prop, sep, value = part.partition("=")
-        if sep:
-            pairs[prop] = value
-    return pairs
 
 
 def load_pack(pack_path: str | Path) -> Textures:

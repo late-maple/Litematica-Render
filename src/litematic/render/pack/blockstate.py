@@ -22,6 +22,17 @@ def _block_id(state_name: str) -> str:
 
 
 
+def _state_pairs(state_key: str) -> dict[str, str]:
+    """Parse a state key into its property pairs; the empty key is {}."""
+    pairs: dict[str, str] = {}
+    for part in state_key.split(","):
+        prop, sep, value = part.partition("=")
+        if sep:
+            pairs[prop] = value
+    return pairs
+
+
+
 def _when_matches(
     condition: Mapping[str, Any], values: Mapping[str, str]
 ) -> bool:
