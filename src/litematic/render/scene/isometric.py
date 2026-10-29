@@ -123,16 +123,33 @@ class _Luts(NamedTuple):
     cull_class: np.ndarray  # (P,) i32 pair class, negative entries never pair
 
 
-class _Piece(NamedTuple):
-    """One slab's expanded camera-facing quads in world coordinates."""
+class _Arena(NamedTuple):
+    """Preallocated scene columns filled slab by slab."""
 
-    cells: np.ndarray  # (K, 3) i8 world block cell per quad
+    x: np.ndarray  # (K,) i32 world block x per quad
+    y: np.ndarray  # (K,) i32 world block y per quad
+    z: np.ndarray  # (K,) i32 world block z per quad
     vtx: np.ndarray  # (K, 4, 3) f32 block-local, yaw rotated
     uv: np.ndarray  # (K, 4, 2) f32
     ao: np.ndarray  # (K, 4) f32
     shade: np.ndarray  # (K,) u1 camera-facing tier
     dbl: np.ndarray  # (K,) bool
-    texkey_ids: np.ndarray  # (K,) i32
+    texkey: np.ndarray  # (K,) i32
+
+
+def _new_arena(capacity: int) -> _Arena:
+    """Allocate the exact scene columns for the counted quad total."""
+    return _Arena(
+        np.zeros(capacity, np.int32),
+        np.zeros(capacity, np.int32),
+        np.zeros(capacity, np.int32),
+        np.zeros((capacity, 4, 3), np.float32),
+        np.zeros((capacity, 4, 2), np.float32),
+        np.zeros((capacity, 4), np.float32),
+        np.zeros(capacity, np.uint8),
+        np.zeros(capacity, bool),
+        np.zeros(capacity, np.int32),
+    )
 
 
 def _compose(schem: Litematic, yaw: int, textures: Textures) -> _Scene:
@@ -146,43 +163,50 @@ def _compose(schem: Litematic, yaw: int, textures: Textures) -> _Scene:
 
 
 def _compose_inner(schem: Litematic, yaw: int, textures: Textures) -> _Scene:
-    """Expand every region's visible cells into yawed, filtered quads."""
+    """Expand every region's visible cells into yawed, filtered quads.
+
+    Pass A stashes per-slab visible cells and counts the exact camera-facing
+    quad total; pass B expands each slab straight into the preallocated
+    arena through a rolling occlusion window, so no intermediate list of
+    slab pieces is ever held.
+    """
     key_ids: dict[str, int] = {}
     key_arrays: dict[str, np.ndarray] = {}
-    xs: list[np.ndarray] = []
-    ys: list[np.ndarray] = []
-    zs: list[np.ndarray] = []
-    pieces: list[_Piece] = []
     tier_map = _YAW_TIER_MAPS[yaw]
     dir_a, dir_b = _horizontal_cull_dirs(yaw)
+    plan = []
+    capacity = 0
     for name in sorted(schem.regions):
         region = schem.regions[name]
         luts = _palette_luts(region.palette, textures, key_ids, key_arrays)
         if luts.pool is None:
             continue
-        occ = _occlusion_flat(region, luts.occludes)
-        idx = region.block_indices
-        px, py, pz = region.position.x, region.position.y, region.position.z
-        for cx, cy, cz, picked in _visible_slabs(
-            region, luts, dir_a, dir_b
-        ):
-            piece = _expand_slab(
-                cx, cy, cz, picked, luts, occ, idx, tier_map, yaw
-            )
-            if len(piece.cells) == 0:
-                continue
-            pieces.append(piece)
-            xs.append(piece.cells[:, 0] + px)
-            ys.append(piece.cells[:, 1] + py)
-            zs.append(piece.cells[:, 2] + pz)
-    if not xs:
+        cam_rows = _camera_row_counts(luts, tier_map)
+        stash = list(_visible_slabs(region, luts, dir_a, dir_b))
+        capacity += sum(
+            int(cam_rows[picked.astype(np.int64)].sum())
+            for (*_, picked) in stash
+        )
+        plan.append((region, luts, stash))
+    if capacity == 0:
         return _empty_scene()
-    x = np.concatenate(xs)
-    y = np.concatenate(ys)
-    z = np.concatenate(zs)
-    x -= int(x.min())
-    y -= int(y.min())
-    z -= int(z.min())
+    arena = _new_arena(capacity)
+    written = 0
+    for region, luts, stash in plan:
+        px, py, pz = region.position.x, region.position.y, region.position.z
+        idx = region.block_indices
+        for y0, y1, lx, ly, lz, picked in stash:
+            written += _expand_slab_into(
+                arena, written, y0, y1, lx, ly, lz, picked,
+                luts, idx, tier_map, yaw, (px, py, pz),
+            )
+        stash.clear()
+    x = arena.x[:written]
+    y = arena.y[:written]
+    z = arena.z[:written]
+    x = x - int(x.min())
+    y = y - int(y.min())
+    z = z - int(z.min())
     rx, rz = _yaw_rot(x, z, yaw, int(x.max()) + 1, int(z.max()) + 1)
     span_w = int(rx.max()) + int(rz.max()) + 2
     span_h = int(rx.max()) + int(rz.max()) + 2 * int(y.max()) + 4
@@ -190,16 +214,28 @@ def _compose_inner(schem: Litematic, yaw: int, textures: Textures) -> _Scene:
         rx.astype(np.int32),
         y.astype(np.int32),
         rz.astype(np.int32),
-        np.concatenate([piece.vtx for piece in pieces]),
-        np.concatenate([piece.uv for piece in pieces]),
-        np.concatenate([piece.ao for piece in pieces]),
-        np.concatenate([piece.shade for piece in pieces]),
-        np.concatenate([piece.dbl for piece in pieces]),
-        np.concatenate([piece.texkey_ids for piece in pieces]).astype(np.int32),
+        arena.vtx[:written],
+        arena.uv[:written],
+        arena.ao[:written],
+        arena.shade[:written],
+        arena.dbl[:written],
+        arena.texkey[:written],
         dict(key_arrays),
         span_w,
         span_h,
     )
+
+
+def _camera_row_counts(luts: _Luts, tier_map: np.ndarray) -> np.ndarray:
+    """Camera-facing pool-row count per palette entry under this yaw."""
+    pool = luts.pool
+    if pool is None:
+        return np.zeros(len(luts.offsets) - 1, np.int64)
+    counts = np.zeros(len(luts.offsets) - 1, np.int64)
+    for i in range(len(counts)):
+        rows = pool[luts.offsets[i] : luts.offsets[i + 1]]
+        counts[i] = int(np.isin(tier_map[rows["shade"]], _CAMERA_TIERS).sum())
+    return counts
 
 
 def _empty_scene() -> _Scene:
@@ -460,19 +496,24 @@ def _register_key(
     return key_ids[key]
 
 
-def _occlusion_flat(
-    region, occludes: np.ndarray
-) -> tuple[np.ndarray, tuple[int, int, int]]:
-    """Region occlusion as a False-padded flat grid plus per-axis strides."""
-    idx = region.block_indices
+def _occlusion_window(
+    idx: np.ndarray, occludes: np.ndarray, y0: int, y1: int
+) -> tuple[np.ndarray, tuple[int, int, int], int]:
+    """False-padded flat occlusion grid over rows [y0-1, y1].
+
+    AO and cullface lookups reach at most one row beyond the slab, so the
+    window never needs the rest of the region; region-edge rows fall to
+    the False padding exactly like the vanilla out-of-bounds air.
+    """
     sx, sy, sz = idx.shape
-    padded = np.zeros((sx + 2, sy + 2, sz + 2), bool)
-    for y0 in range(0, sy, _Y_SLAB):
-        y1 = min(y0 + _Y_SLAB, sy)
-        padded[1 : sx + 1, 1 + y0 : 1 + y1, 1 : sz + 1] = occludes[
-            idx[:, y0:y1, :]
-        ]
-    return padded.ravel(), ((sy + 2) * (sz + 2), sz + 2, 1)
+    wy0 = max(y0 - 1, 0)
+    wy1 = min(y1 + 1, sy)
+    padded = np.zeros((sx + 2, wy1 - wy0 + 2, sz + 2), bool)
+    padded[1 : sx + 1, 1 : wy1 - wy0 + 1, 1 : sz + 1] = occludes[
+        idx[:, wy0:wy1, :]
+    ]
+    strides = ((wy1 - wy0 + 2) * (sz + 2), sz + 2, 1)
+    return padded.ravel(), strides, wy0
 
 
 def _visible_slabs(
@@ -481,7 +522,7 @@ def _visible_slabs(
     dir_a: tuple[int, int],
     dir_b: tuple[int, int],
 ):
-    """Yield (x, y, z, palette index) arrays for each slab's visible cells."""
+    """Yield each slab's row span plus its visible cells for the arena."""
     idx = region.block_indices
     sx, sy, sz = idx.shape
     is_air, occludes = luts.is_air, luts.occludes
@@ -500,7 +541,7 @@ def _visible_slabs(
         if not visible.any():
             continue
         lx, ly, lz = np.nonzero(visible)
-        yield lx, ly + y0, lz, body[visible]
+        yield y0, y1, lx, ly + y0, lz, body[visible]
 
 
 def _shifted(grid: np.ndarray, dx: int, dz: int) -> np.ndarray:
@@ -517,32 +558,36 @@ def _shifted(grid: np.ndarray, dx: int, dz: int) -> np.ndarray:
     return out
 
 
-def _expand_slab(
-    cx: np.ndarray,
-    cy: np.ndarray,
-    cz: np.ndarray,
+def _expand_slab_into(
+    arena: _Arena,
+    offset: int,
+    y0: int,
+    y1: int,
+    lx: np.ndarray,
+    ly: np.ndarray,
+    lz: np.ndarray,
     picked: np.ndarray,
     luts: _Luts,
-    occ: tuple[np.ndarray, tuple[int, int, int]],
     idx: np.ndarray,
     tier_map: np.ndarray,
     yaw: int,
-) -> _Piece:
-    """Expand one slab's cells into filtered world quads with vertex AO."""
+    position: tuple[int, int, int],
+) -> int:
+    """Expand one stashed slab into the arena; return the quads written."""
     picked = picked.astype(np.int64)
     pool = luts.pool
     if pool is None:
-        return _empty_piece()
+        return 0
     counts = luts.offsets[picked + 1] - luts.offsets[picked]
     total = int(counts.sum())
     if total == 0:
-        return _empty_piece()
+        return 0
     cell_of = np.repeat(np.arange(len(picked), dtype=np.int64), counts)
     starts = np.cumsum(counts) - counts
     within = np.arange(total, dtype=np.int64) - np.repeat(starts, counts)
     pool_idx = np.repeat(luts.offsets[picked], counts) + within
     quads = pool[pool_idx]
-    cells = np.stack([cx[cell_of], cy[cell_of], cz[cell_of]], axis=1)
+    cells = np.stack([lx[cell_of], ly[cell_of], lz[cell_of]], axis=1)
     ids = luts.texkey_ids[pool_idx]
     new_tier = tier_map[quads["shade"]]
     keep = np.isin(new_tier, _CAMERA_TIERS)
@@ -550,19 +595,25 @@ def _expand_slab(
     cells = cells[keep]
     ids = ids[keep]
     cell_of = cell_of[keep]
+    occ = _occlusion_window(idx, luts.occludes, y0, y1)
     alive = _cull_alive(
         quads, cells, picked[cell_of], luts.cull_class, occ, idx
     )
     quads = quads[alive]
-    return _Piece(
-        cells[alive],
-        _rotate_vertices(quads["vtx"], yaw),
-        quads["uv"],
-        _vertex_ao(quads, cells[alive], *occ),
-        new_tier[keep][alive],
-        quads["dbl"],
-        ids[alive],
-    )
+    cells = cells[alive]
+    count = len(cells)
+    end = offset + count
+    px, py, pz = position
+    arena.x[offset:end] = cells[:, 0] + px
+    arena.y[offset:end] = cells[:, 1] + py
+    arena.z[offset:end] = cells[:, 2] + pz
+    arena.vtx[offset:end] = _rotate_vertices(quads["vtx"], yaw)
+    arena.uv[offset:end] = quads["uv"]
+    arena.ao[offset:end] = _vertex_ao(quads, cells, *occ)
+    arena.shade[offset:end] = new_tier[keep][alive]
+    arena.dbl[offset:end] = quads["dbl"]
+    arena.texkey[offset:end] = ids[alive]
+    return count
 
 
 def _cull_alive(
@@ -570,7 +621,7 @@ def _cull_alive(
     cells: np.ndarray,
     cell_palette: np.ndarray,
     cull_class: np.ndarray,
-    occ: tuple[np.ndarray, tuple[int, int, int]],
+    occ: tuple[np.ndarray, tuple[int, int, int], int],
     idx: np.ndarray,
 ) -> np.ndarray:
     """Alive mask after neighbor culling; no-cullface rows always alive."""
@@ -594,18 +645,19 @@ def _cull_alive(
         ],
         axis=1,
     )
-    flat, (st_x, st_y, st_z) = occ
+    flat, (st_x, st_y, st_z), wy0 = occ
+    win_h = st_x // st_y - 2
     nb_pad = np.stack(
         [
             np.clip(nb[..., 0], -1, sx + 1),
-            np.clip(nb[..., 1], -1, sy + 1),
+            np.clip(nb[..., 1], wy0 - 1, wy0 + win_h),
             np.clip(nb[..., 2], -1, sz + 1),
         ],
         axis=1,
     )
     occluded = flat[
         (nb_pad[..., 0] + 1) * st_x
-        + (nb_pad[..., 1] + 1) * st_y
+        + (nb_pad[..., 1] + 1 - wy0) * st_y
         + (nb_pad[..., 2] + 1) * st_z
     ]
     neighbor_pi = idx[nb_clipped[..., 0], nb_clipped[..., 1], nb_clipped[..., 2]]
@@ -617,19 +669,6 @@ def _cull_alive(
     )
     mask[rows] = ~(occluded | pair)
     return mask
-
-
-def _empty_piece() -> _Piece:
-    """Return a zero-quad slab piece."""
-    return _Piece(
-        np.zeros((0, 3), np.int64),
-        np.zeros((0, 4, 3), np.float32),
-        np.zeros((0, 4, 2), np.float32),
-        np.zeros((0, 4), np.float32),
-        np.zeros(0, np.uint8),
-        np.zeros(0, bool),
-        np.zeros(0, np.int32),
-    )
 
 
 def _rotate_vertices(vtx: np.ndarray, yaw: int) -> np.ndarray:
@@ -646,6 +685,7 @@ def _vertex_ao(
     cells: np.ndarray,
     flat: np.ndarray,
     strides: tuple[int, int, int],
+    y_base: int = 0,
 ) -> np.ndarray:
     """Per-vertex AO multipliers from the padded flat occlusion grid."""
     tier = quads["shade"].astype(np.int64)
@@ -667,7 +707,7 @@ def _vertex_ao(
     cells32 = cells.astype(np.int32)
     base = (
         (cells32[:, 0] + 1) * np.int32(st_x)
-        + (cells32[:, 1] + 1) * np.int32(st_y)
+        + (cells32[:, 1] + 1 - y_base) * np.int32(st_y)
         + (cells32[:, 2] + 1) * np.int32(st_z)
         + normals[:, 0] * np.int32(st_x)
         + normals[:, 1] * np.int32(st_y)

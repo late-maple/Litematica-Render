@@ -15,6 +15,7 @@ from litematic.render.quads import (
     TIER_UP,
     unit_cube_quads,
 )
+from litematic.render.scene import isometric as isometric_mod
 from litematic.render.scene.isometric import (
     _MAGENTA_TEXKEY,
     _backfill_builtin,
@@ -888,3 +889,117 @@ def test_ao_boundary_cells_match_reference():
     )
     out = _vertex_ao(quads, cells, flat, strides)
     assert (out == _reference_ao(quads, cells, grid)).all()
+
+
+# Streaming compose: slab height must not change the scene; boundaries
+# across slabs behave like in-region neighbors; the arena trims slack.
+
+
+def _box_schematic(size, name):
+    sx, sy, sz = size
+    palette = [("minecraft:air", {}), (name, {})]
+    indices = np.ones(sx * sy * sz, dtype=np.uint16)
+    return _schematic([("Main", (0, 0, 0), size, palette, indices)])
+
+
+def _scene_rows(scene):
+    """Scene quads as a sortable row multiset (order-independent compare)."""
+    return sorted(
+        zip(
+            scene.x.tolist(),
+            scene.y.tolist(),
+            scene.z.tolist(),
+            scene.quad_shade.tolist(),
+            [r.tobytes() for r in scene.quad_vtx],
+            [r.tobytes() for r in scene.quad_uv],
+            [r.tobytes() for r in scene.quad_ao],
+            scene.quad_dbl.tolist(),
+            scene.texkey_ids.tolist(),
+        )
+    )
+
+
+def test_slab_height_invariance(monkeypatch):
+    # Slab height changes quad ORDER (x-major per slab), never content.
+    schem = _box_schematic((3, 130, 3), "minecraft:stone")
+    textures = _pair_pack({"minecraft:stone": ("block/stone", True)})
+    rows = None
+    for slab in (130, 64, 7):
+        monkeypatch.setattr(isometric_mod, "_Y_SLAB", slab)
+        scene = _compose(schem, 0, textures)
+        if rows is None:
+            rows = _scene_rows(scene)
+        assert _scene_rows(scene) == rows
+
+
+def test_slab_boundary_ao_and_cull():
+    palette = [
+        ("minecraft:air", {}),
+        ("minecraft:glass", {}),
+        ("minecraft:stone", {}),
+    ]
+    indices = np.zeros(3 * 128 * 3, dtype=np.uint16).reshape(128, 3, 3)
+    indices[63, 1, 1] = 1  # glass right under the slab edge
+    indices[64, :, :] = 2  # stone layer right above, across y=64
+    indices = indices.ravel()
+    schem = _schematic([("Main", (0, 0, 0), (3, 128, 3), palette, indices)])
+    textures = _pair_pack(
+        {
+            "minecraft:glass": ("block/glass", False),
+            "minecraft:stone": ("block/stone", True),
+        }
+    )
+    scene = _compose(schem, 0, textures)
+    tiers = _cell_tiers(scene)
+    glass_y = int(scene.y.min())  # the glass cell after min-shift
+    assert (0, glass_y, 0, TIER_UP) not in tiers  # culled by the stone
+
+    # Without a cullface the face survives and AO must see the stone.
+    palette[1] = ("minecraft:plain", {})
+    plain = loads(
+        build_litematic_bytes(
+            [
+                {
+                    "name": "Main",
+                    "position": (0, 0, 0),
+                    "size": (3, 128, 3),
+                    "palette": palette,
+                    "indices_yzx": indices,
+                }
+            ]
+        )
+    )
+    plain_textures = Textures(
+        version="pack-quads",
+        arrays={
+            "block/plain": np.full((16, 16, 4), _STONE, np.uint8),
+            "block/stone2": np.full((16, 16, 4), _STONE, np.uint8),
+        },
+        quads_map={
+            "minecraft:plain[]": unit_cube_quads("block/plain"),
+            "minecraft:stone[]": _cull_cube("block/stone2"),
+        },
+        occl_map={"minecraft:plain[]": False, "minecraft:stone[]": True},
+        pack_mtime=0.0,
+        states=None,
+        parts_map={},
+        mquad_map={},
+    )
+    scene = _compose(plain, 0, plain_textures)
+    plain_y = int(scene.y.min())
+    rows = (scene.y == plain_y) & (scene.quad_shade == TIER_UP)
+    assert rows.any() and float(scene.quad_ao[rows].max()) < 1.0
+
+
+def test_arena_trim_removes_cull_slack():
+    entries = {"minecraft:stone": ("block/stone", True)}
+    scene = _row_scene(entries, "minecraft:stone", "minecraft:stone")
+    # Capacity is 2 cells x 3 camera faces; one face is culled.
+    assert len(scene.x) == 5
+
+
+def test_degenerate_regions():
+    textures = _pair_pack({"minecraft:stone": ("block/stone", True)})
+    assert len(_compose(_single_block("minecraft:air"), 0, textures).x) == 0
+    empty = _box_schematic((2, 1, 2), "minecraft:air")
+    assert len(_compose(empty, 0, textures).x) == 0
