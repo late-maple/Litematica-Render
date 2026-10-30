@@ -673,10 +673,16 @@ def test_unit_box_compiles_six_quads():
     assert sorted(int(t) for t in quads["shade"]) == [0, 1, 2, 3, 4, 5]
     assert not quads["dbl"].any()
     full_uv = [(0, 0), (16, 0), (16, 16), (0, 16)]
+    mirrored_uv = [(16, 0), (0, 0), (0, 16), (16, 16)]
     for quad in quads:
         assert quad["texkey"] == "block/stone"
-        assert np.allclose(quad["uv"], full_uv)
-        assert np.allclose(quad["vtx"], _FACE_GEOM[int(quad["shade"])])
+        tier = int(quad["shade"])
+        expected_uv = (
+            full_uv if tier in (TIER_DOWN, TIER_UP, TIER_NORTH, TIER_SOUTH)
+            else mirrored_uv
+        )
+        assert np.allclose(quad["uv"], expected_uv)
+        assert np.allclose(quad["vtx"], _FACE_GEOM[tier])
 
 
 def test_half_box_auto_uv_crops():
@@ -692,8 +698,11 @@ def test_half_box_auto_uv_crops():
     assert quads is not None
     by_tier = {int(q["shade"]): q for q in quads}
     side_uv = [(0, 8), (16, 8), (16, 16), (0, 16)]
-    for tier in (TIER_NORTH, TIER_SOUTH, TIER_WEST, TIER_EAST):
+    for tier in (TIER_NORTH, TIER_SOUTH):
         assert np.allclose(by_tier[tier]["uv"], side_uv)
+    mirrored_uv = [(16, 8), (0, 8), (0, 16), (16, 16)]
+    for tier in (TIER_WEST, TIER_EAST):
+        assert np.allclose(by_tier[tier]["uv"], mirrored_uv)
     assert np.allclose(
         by_tier[TIER_SOUTH]["vtx"],
         [(0, 8, 16), (16, 8, 16), (16, 0, 16), (0, 0, 16)],
@@ -712,7 +721,7 @@ def test_y_rot_remaps_east_to_south():
     assert np.allclose(
         east["vtx"], [(16, 16, 16), (0, 16, 16), (0, 0, 16), (16, 0, 16)]
     )
-    assert np.allclose(east["uv"], [(0, 0), (16, 0), (16, 16), (0, 16)])
+    assert np.allclose(east["uv"], [(16, 0), (0, 0), (0, 16), (16, 16)])
 
 
 def test_furnace_front_upright_on_south():
@@ -793,6 +802,80 @@ def test_face_uv_rotation_applies_to_auto_uv():
     )
     assert quads is not None
     assert np.allclose(quads[0]["uv"], [(16, 16), (0, 16), (0, 0), (16, 0)])
+
+
+def test_explicit_uv_west_east_follow_vanilla_u_axis():
+    faces = {
+        "west": {"texture": "#all", "uv": [4, 8, 12, 16]},
+        "east": {"texture": "#all", "uv": [4, 8, 12, 16]},
+    }
+    quads = _compile_elements(
+        [_box_element(faces)],
+        {"all": "block/stone"},
+        "minecraft",
+        0,
+        0,
+        _texkey_stub({"block/stone": "block/stone"}),
+    )
+    assert quads is not None
+    by_tier = {int(q["shade"]): q for q in quads}
+    # Vanilla FaceInfo maps west vertex0 to max-z and east vertex0 to max-z,
+    # so the rect's min-u lands on the south edge for both faces.
+    assert np.allclose(by_tier[TIER_WEST]["uv"], [(12, 8), (4, 8), (4, 16), (12, 16)])
+    assert np.allclose(by_tier[TIER_EAST]["uv"], [(12, 8), (4, 8), (4, 16), (12, 16)])
+
+
+def test_auto_uv_west_east_follow_vanilla_u_axis():
+    faces = {"west": {"texture": "#all"}, "east": {"texture": "#all"}}
+    quads = _compile_elements(
+        [_box_element(faces)],
+        {"all": "block/stone"},
+        "minecraft",
+        0,
+        0,
+        _texkey_stub({"block/stone": "block/stone"}),
+    )
+    assert quads is not None
+    by_tier = {int(q["shade"]): q for q in quads}
+    expected = [(16, 0), (0, 0), (0, 16), (16, 16)]
+    assert np.allclose(by_tier[TIER_WEST]["uv"], expected)
+    assert np.allclose(by_tier[TIER_EAST]["uv"], expected)
+
+
+def test_east_uv_rotation_uses_vanilla_vertex_permutation():
+    quads = _compile_elements(
+        [
+            _box_element(
+                {"east": {"texture": "#all", "uv": [0, 0, 16, 16], "rotation": 90}}
+            )
+        ],
+        {"all": "block/stone"},
+        "minecraft",
+        0,
+        0,
+        _texkey_stub({"block/stone": "block/stone"}),
+    )
+    assert quads is not None
+    # Vertex i reads corner (i + shift) % 4 through the FaceInfo order.
+    assert np.allclose(quads[0]["uv"], [(0, 0), (0, 16), (16, 16), (16, 0)])
+
+
+def test_variant_rotation_bakes_world_locked_uv():
+    faces = {
+        "north": {"texture": "#north", "uv": [4, 8, 12, 16]},
+        "down": {"texture": "#down", "uv": [4, 8, 12, 16]},
+    }
+    textures = {"north": "block/north", "down": "block/down"}
+    files = {"block/north": "north_key", "block/down": "down_key"}
+    quads = _compile_elements(
+        [_box_element(faces)], textures, "minecraft", 90, 0, _texkey_stub(files)
+    )
+    assert quads is not None
+    by_key = {str(q["texkey"]): q for q in quads}
+    # x90 bakes the model-north uv frame 180 degrees (world-locked frame).
+    assert np.allclose(by_key["north_key"]["uv"], [(12, 8), (4, 8), (4, 0), (12, 0)])
+    # The model-down face is bake-neutral under x90.
+    assert np.allclose(by_key["down_key"]["uv"], [(4, 8), (12, 8), (12, 16), (4, 16)])
 
 
 def test_face_uv_rotation_out_of_vanilla_set_skips_face():
@@ -892,7 +975,8 @@ def test_x_rot_remaps_north_to_down():
     north = next(q for q in quads if q["texkey"] == "block/north")
     assert int(north["shade"]) == TIER_DOWN
     assert np.allclose(north["vtx"], [(16, 0, 0), (0, 0, 0), (0, 0, 16), (16, 0, 16)])
-    assert np.allclose(north["uv"], [(0, 0), (16, 0), (16, 16), (0, 16)])
+    # The x90 bake frame compensates the model uv (world-locked texture).
+    assert np.allclose(north["uv"], [(16, 16), (0, 16), (0, 0), (16, 0)])
 
 
 def test_face_geom_matches_unit_cube_quads():

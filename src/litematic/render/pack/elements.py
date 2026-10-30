@@ -179,6 +179,8 @@ def _compile_elements(
                 if isinstance(cullface, str) and cullface in _VEC
                 else CULL_NONE
             )
+            turns = _UV_BAKE[(kx, ky)][tier]
+            uvs = [_bake_vertex_uv(uv, turns) for uv in uvs]
             rows.append(
                 (_rotate_corners(corners, kx, ky), uvs, texkey, shade, double, cull)
             )
@@ -298,51 +300,102 @@ def _box_corners(
 def _face_uvs(
     face: dict[str, Any], tier: int, corners: list[tuple[float, float, float]]
 ) -> list[tuple[float, float]] | None:
-    """Resolve per-corner texel coords: explicit uv first, else auto-UV."""
+    """Resolve per-corner texel coords per the vanilla vertex tables."""
     rect = face.get("uv")
     if rect is None:
-        uvs = [_auto_uv(tier, x, y, z) for (x, y, z) in corners]
+        rect = _default_face_uv(tier, corners)
     else:
         if not isinstance(rect, (list, tuple)) or len(rect) != 4:
             return None
         try:
-            u1, v1, u2, v2 = (float(value) for value in rect)
+            rect = (float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
         except (TypeError, ValueError, OverflowError):
             return None
-        if not all(math.isfinite(value) for value in (u1, v1, u2, v2)):
+        if not all(math.isfinite(value) for value in rect):
             return None
-        if min(u1, v1, u2, v2) < 0.0 or max(u1, v1, u2, v2) > 16.0:
+        if min(rect) < 0.0 or max(rect) > 16.0:
             return None
-        uvs = [(u1, v1), (u2, v1), (u2, v2), (u1, v2)]
     rotation = face.get("rotation")
-    if rotation is None:
-        return uvs
-    if isinstance(rotation, bool) or not isinstance(rotation, (int, float)):
-        return None
-    if rotation not in (0, 90, 180, 270):
-        return None
-    shift = int(rotation) // 90
-    if shift:
-        # The corner ring runs clockwise on the face, so vanilla's clockwise
-        # texture rotation takes each corner's coords from shift slots back.
-        uvs = uvs[-shift:] + uvs[:-shift]
-    return uvs
+    shift = 0
+    if rotation is not None:
+        if isinstance(rotation, bool) or not isinstance(rotation, (int, float)):
+            return None
+        if rotation not in (0, 90, 180, 270):
+            return None
+        shift = int(rotation) // 90
+    u1, v1, u2, v2 = rect
+    corner_uv = ((u1, v1), (u1, v2), (u2, v2), (u2, v1))
+    return [
+        corner_uv[(vertex + shift) % 4]
+        for vertex in _VANILLA_VERTEX[tier]
+    ]
 
 
 
-def _auto_uv(tier: int, x: float, y: float, z: float) -> tuple[float, float]:
-    """Map one face corner to texel coords per the pinned auto-UV axis table."""
+_VANILLA_VERTEX = {
+    TIER_DOWN: (0, 3, 2, 1),
+    TIER_UP: (0, 3, 2, 1),
+    TIER_NORTH: (0, 3, 2, 1),
+    TIER_SOUTH: (0, 3, 2, 1),
+    TIER_WEST: (3, 0, 1, 2),
+    TIER_EAST: (3, 0, 1, 2),
+}
+
+
+
+_UV_BAKE = {
+    (0, 0): (0, 0, 0, 0, 0, 0),
+    (0, 1): (3, 1, 0, 0, 0, 0),
+    (0, 2): (2, 2, 0, 0, 0, 0),
+    (0, 3): (1, 3, 0, 0, 0, 0),
+    (1, 0): (0, 2, 2, 0, 3, 1),
+    (1, 1): (0, 2, 1, 1, 3, 1),
+    (1, 2): (0, 2, 0, 2, 3, 1),
+    (1, 3): (0, 2, 3, 3, 3, 1),
+    (2, 0): (0, 0, 2, 2, 2, 2),
+    (2, 1): (3, 1, 2, 2, 2, 2),
+    (2, 2): (2, 2, 2, 2, 2, 2),
+    (2, 3): (1, 3, 2, 2, 2, 2),
+    (3, 0): (2, 0, 2, 0, 1, 3),
+    (3, 1): (2, 0, 3, 3, 1, 3),
+    (3, 2): (2, 0, 0, 2, 1, 3),
+    (3, 3): (2, 0, 1, 1, 1, 3),
+}
+
+
+def _bake_vertex_uv(uv: tuple[float, float], turns: int) -> tuple[float, float]:
+    """Rotate one texel coord around the tile center by quarter-turns."""
+    if turns == 0:
+        return uv
+    u, v = uv
+    if turns == 1:
+        return (16.0 - v, u)
+    if turns == 2:
+        return (16.0 - u, 16.0 - v)
+    return (v, 16.0 - u)
+
+
+def _default_face_uv(
+    tier: int, corners: list[tuple[float, float, float]]
+) -> tuple[float, float, float, float]:
+    """Vanilla defaultFaceUV extents for one tier from the element corners."""
+    xs = [corner[0] for corner in corners]
+    ys = [corner[1] for corner in corners]
+    zs = [corner[2] for corner in corners]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+    z0, z1 = min(zs), max(zs)
     if tier == TIER_DOWN:
-        return (x, 16.0 - z)
+        return (x0, 16.0 - z1, x1, 16.0 - z0)
     if tier == TIER_UP:
-        return (x, z)
+        return (x0, z0, x1, z1)
     if tier == TIER_NORTH:
-        return (16.0 - x, 16.0 - y)
+        return (16.0 - x1, 16.0 - y1, 16.0 - x0, 16.0 - y0)
     if tier == TIER_SOUTH:
-        return (x, 16.0 - y)
+        return (x0, 16.0 - y1, x1, 16.0 - y0)
     if tier == TIER_WEST:
-        return (16.0 - z, 16.0 - y)
-    return (z, 16.0 - y)
+        return (z0, 16.0 - y1, z1, 16.0 - y0)
+    return (16.0 - z1, 16.0 - y1, 16.0 - z0, 16.0 - y0)
 
 
 
