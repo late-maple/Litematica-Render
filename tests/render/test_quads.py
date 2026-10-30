@@ -18,9 +18,7 @@ from litematic.render.quads import (
     unit_cube_quads,
 )
 
-# Corner order is (u1,v1),(u2,v1),(u2,v2),(u1,v2); auto-UV axes per plan:
-# down u=x v=16-z | up u=x v=z | north u=16-x v=16-y | south u=x v=16-y
-# west u=16-z v=16-y | east u=z v=16-y
+# Per-vertex auto-UV expectations per the vanilla defaultFaceUV axes.
 _CUBE = {
     TIER_DOWN: (
         [(0, 0, 16), (16, 0, 16), (16, 0, 0), (0, 0, 0)],
@@ -40,11 +38,11 @@ _CUBE = {
     ),
     TIER_WEST: (
         [(0, 16, 16), (0, 16, 0), (0, 0, 0), (0, 0, 16)],
-        [(0, 0), (16, 0), (16, 16), (0, 16)],
+        [(16, 0), (0, 0), (0, 16), (16, 16)],
     ),
     TIER_EAST: (
         [(16, 16, 0), (16, 16, 16), (16, 0, 16), (16, 0, 0)],
-        [(0, 0), (16, 0), (16, 16), (0, 16)],
+        [(16, 0), (0, 0), (0, 16), (16, 16)],
     ),
 }
 
@@ -98,6 +96,28 @@ def test_unit_cube_quads_match_auto_uv_table():
         row = quads[quads["shade"] == tier][0]
         assert np.array_equal(row["vtx"], np.array(vtx, dtype="f4"))
         assert np.array_equal(row["uv"], np.array(uv, dtype="f4"))
+
+
+def test_unit_cube_winding_handedness_pinned():
+    """Pin the mixed winding: W/E normals-out, the rest normals-in."""
+    quads = unit_cube_quads("block/stone")
+    axes = {
+        TIER_DOWN: (0, -1, 0),
+        TIER_UP: (0, 1, 0),
+        TIER_NORTH: (0, 0, -1),
+        TIER_SOUTH: (0, 0, 1),
+        TIER_WEST: (-1, 0, 0),
+        TIER_EAST: (1, 0, 0),
+    }
+    for quad in quads:
+        tier = int(quad["shade"])
+        edge1 = quad["vtx"][1] - quad["vtx"][0]
+        edge2 = quad["vtx"][2] - quad["vtx"][1]
+        dot = float(np.dot(np.cross(edge1, edge2), axes[tier]))
+        if tier in (TIER_WEST, TIER_EAST):
+            assert dot > 0
+        else:
+            assert dot < 0
 
 
 def test_unit_cube_quads_unshaded_uses_up_tier():

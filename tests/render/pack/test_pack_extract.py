@@ -868,11 +868,12 @@ def test_variant_rotation_bakes_world_locked_uv():
     textures = {"north": "block/north", "down": "block/down"}
     files = {"block/north": "north_key", "block/down": "down_key"}
     quads = _compile_elements(
-        [_box_element(faces)], textures, "minecraft", 90, 0, _texkey_stub(files)
+        [_box_element(faces)], textures, "minecraft", 90, 0, _texkey_stub(files),
+        uvlock=True,
     )
     assert quads is not None
     by_key = {str(q["texkey"]): q for q in quads}
-    # x90 bakes the model-north uv frame 180 degrees (world-locked frame).
+    # x90 + uvlock bakes the model-north uv frame 180 degrees.
     assert np.allclose(by_key["north_key"]["uv"], [(12, 8), (4, 8), (4, 0), (12, 0)])
     # The model-down face is bake-neutral under x90.
     assert np.allclose(by_key["down_key"]["uv"], [(4, 8), (12, 8), (12, 16), (4, 16)])
@@ -969,14 +970,138 @@ def test_x_rot_remaps_north_to_down():
     faces = {name: {"texture": f"block/{name}"} for name in _FACES}
     files = {f"block/{name}": f"block/{name}" for name in _FACES}
     quads = _compile_elements(
-        [_box_element(faces)], {}, "minecraft", 90, 0, _texkey_stub(files)
+        [_box_element(faces)], {}, "minecraft", 90, 0, _texkey_stub(files),
+        uvlock=True,
     )
     assert quads is not None
     north = next(q for q in quads if q["texkey"] == "block/north")
     assert int(north["shade"]) == TIER_DOWN
     assert np.allclose(north["vtx"], [(16, 0, 0), (0, 0, 0), (0, 0, 16), (16, 0, 16)])
-    # The x90 bake frame compensates the model uv (world-locked texture).
+    # The x90 + uvlock bake frame compensates the model uv (world-locked).
     assert np.allclose(north["uv"], [(16, 16), (0, 16), (0, 0), (16, 0)])
+
+
+def test_variant_without_uvlock_keeps_model_uv_under_rotation():
+    """Non-uvlock variants ride the rotation: model uv stays (vanilla glue)."""
+    faces = {
+        "up": {"texture": "#up", "uv": [4, 8, 12, 16]},
+    }
+    textures = {"up": "up_key"}
+    files = {"up_key": "up_key"}
+    flat = _compile_elements(
+        [_box_element(faces)], textures, "minecraft", 0, 0, _texkey_stub(files)
+    )
+    turned = _compile_elements(
+        [_box_element(faces)], textures, "minecraft", 0, 90, _texkey_stub(files)
+    )
+    assert flat is not None and turned is not None
+    # Geometry rotates; the uv binding rides it untouched (rails corner case).
+    assert not np.allclose(flat[0]["vtx"], turned[0]["vtx"])
+    assert np.allclose(flat[0]["uv"], turned[0]["uv"])
+
+
+def test_variant_uvlock_bakes_world_locked_uv():
+    """uvlock variants bake the world-locked frame compensation."""
+    faces = {"up": {"texture": "#up", "uv": [4, 8, 12, 16]}}
+    textures = {"up": "up_key"}
+    files = {"up_key": "up_key"}
+    flat = _compile_elements(
+        [_box_element(faces)], textures, "minecraft", 0, 0, _texkey_stub(files)
+    )
+    turned = _compile_elements(
+        [_box_element(faces)], textures, "minecraft", 0, 90, _texkey_stub(files),
+        uvlock=True,
+    )
+    assert flat is not None and turned is not None
+    # y90 + uvlock bakes the up face one quarter-turn: (u, v) -> (16 - v, u).
+    assert np.allclose(
+        turned[0]["uv"], [(8, 4), (8, 12), (0, 12), (0, 4)]
+    )
+
+
+def test_multipart_uvlock_compiles_parts_separately(tmp_path):
+    entries = {
+        "assets/minecraft/blockstates/multi.json": json.dumps(
+            {
+                "multipart": [
+                    {"apply": {"model": "block/tint", "x": 90}},
+                    {"apply": {"model": "block/tint", "x": 90, "uvlock": True}},
+                ]
+            }
+        ),
+        "assets/minecraft/models/block/tint.json": _model(
+            {"north": {"texture": "block/tint", "uv": [4, 8, 12, 16]}}
+        ),
+        "assets/minecraft/textures/block/tint.png": _solid_png((200, 30, 30, 255)),
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    keys = [key for key in data.files if key.startswith("mquads/")]
+    glue_key = next(key for key in keys if key.endswith("|u0"))
+    lock_key = next(key for key in keys if key.endswith("|u1"))
+    assert not np.allclose(data[glue_key]["uv"], data[lock_key]["uv"])
+
+
+def test_ender_chest_expands_facing_only_states(tmp_path):
+    entries = {
+        "assets/minecraft/blockstates/ender_chest.json": _blockstates_variants(
+            {"": {"model": "block/ender_chest"}}
+        ),
+        "assets/minecraft/models/block/ender_chest.json": json.dumps(
+            {"textures": {}}
+        ),
+        "assets/minecraft/textures/entity/chest/ender.png": _solid_png(
+            (140, 40, 140, 255)
+        ),
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    state_keys = {
+        key[len("quads/minecraft:ender_chest[") : -1]
+        for key in data.files
+        if key.startswith("quads/minecraft:ender_chest[")
+    }
+    assert state_keys == {
+        "facing=north",
+        "facing=south",
+        "facing=east",
+        "facing=west",
+    }
+
+
+def test_ender_chest_live_state_resolves(tmp_path):
+    entries = {
+        "assets/minecraft/blockstates/ender_chest.json": _blockstates_variants(
+            {"": {"model": "block/ender_chest"}}
+        ),
+        "assets/minecraft/models/block/ender_chest.json": json.dumps(
+            {"textures": {}}
+        ),
+        "assets/minecraft/textures/entity/chest/ender.png": _solid_png(
+            (140, 40, 140, 255)
+        ),
+    }
+    pack = _make_pack(tmp_path / "pack.zip", entries)
+    textures = load_pack(pack)
+    quads = textures.quads(
+        "minecraft:ender_chest", {"facing": "west", "waterlogged": "true"}
+    )
+    assert quads is not None
+    assert len(quads)
+
+
+def test_plain_chest_keeps_type_expanded_states(tmp_path):
+    entries = {
+        "assets/minecraft/blockstates/chest.json": _blockstates_variants(
+            {"": {"model": "block/chest"}}
+        ),
+        "assets/minecraft/models/block/chest.json": json.dumps({"textures": {}}),
+        "assets/minecraft/textures/entity/chest/normal.png": _solid_png(
+            (160, 120, 60, 255)
+        ),
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    keys = {key for key in data.files if key.startswith("quads/minecraft:chest[")}
+    assert "quads/minecraft:chest[facing=north,type=single]" in keys
+    assert "quads/minecraft:chest[facing=north]" not in keys
 
 
 def test_face_geom_matches_unit_cube_quads():

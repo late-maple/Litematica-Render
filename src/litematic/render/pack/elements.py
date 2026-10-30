@@ -7,6 +7,7 @@ import numpy as np
 
 from litematic.render.pack.texture import _rotate
 from litematic.render.quads import (
+    _CUBE_VTX,
     CULL_NONE,
     QUAD_DTYPE,
     TIER_DOWN,
@@ -30,9 +31,7 @@ _FACE_TIER = {
     "west": TIER_WEST,
     "east": TIER_EAST,
 }
-# Pinned auto-UV axes (v runs down the texture): down u=x v=16-z | up u=x
-# v=z | north u=16-x v=16-y | south u=x v=16-y | west u=16-z v=16-y |
-# east u=z v=16-y. Corner order is always (u1,v1),(u2,v1),(u2,v2),(u1,v2).
+# Auto-UVs follow vanilla defaultFaceUV; ring order (u1,v1),(u2,v1),(u2,v2),(u1,v2).
 
 
 
@@ -56,12 +55,8 @@ _RESCALE_FACTORS = {22.5: 1.0823922, 45.0: 1.4142135}
 
 
 _FACE_GEOM: dict[int, tuple[tuple[int, int, int], ...]] = {
-    TIER_DOWN: ((0, 0, 16), (16, 0, 16), (16, 0, 0), (0, 0, 0)),
-    TIER_UP: ((0, 16, 0), (16, 16, 0), (16, 16, 16), (0, 16, 16)),
-    TIER_NORTH: ((16, 16, 0), (0, 16, 0), (0, 0, 0), (16, 0, 0)),
-    TIER_SOUTH: ((0, 16, 16), (16, 16, 16), (16, 0, 16), (0, 0, 16)),
-    TIER_WEST: ((0, 16, 16), (0, 16, 0), (0, 0, 0), (0, 0, 16)),
-    TIER_EAST: ((16, 16, 0), (16, 16, 16), (16, 0, 16), (16, 0, 0)),
+    tier: tuple((int(c[0]), int(c[1]), int(c[2])) for c in corners)
+    for tier, corners in enumerate(_CUBE_VTX)
 }
 # Vanilla element rotation: 90-degree-free angles about one axis through an
 # origin, optionally rescaled on the perpendicular axes by 1/cos(|angle|).
@@ -125,6 +120,8 @@ def _compile_elements(
     x_rot: int,
     y_rot: int,
     texkey_for: Callable[[dict[str, Any], dict[str, str], str], str | None],
+    *,
+    uvlock: bool = False,
 ) -> np.ndarray | None:
     """Compile model elements into world-space quads for one variant."""
     rows: list[tuple[Any, Any, str, int, bool, int]] = []
@@ -179,7 +176,8 @@ def _compile_elements(
                 if isinstance(cullface, str) and cullface in _VEC
                 else CULL_NONE
             )
-            turns = _UV_BAKE[(kx, ky)][tier]
+            # Vanilla bakes UV compensation only for uvlock variants.
+            turns = _UV_BAKE[(kx, ky)][tier] if uvlock else 0
             uvs = [_bake_vertex_uv(uv, turns) for uv in uvs]
             rows.append(
                 (_rotate_corners(corners, kx, ky), uvs, texkey, shade, double, cull)

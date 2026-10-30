@@ -13,7 +13,7 @@ from litematic.render.quads import (
     TIER_SOUTH,
     TIER_UP,
     TIER_WEST,
-    redstone_tint,
+    _redstone_tint,
 )
 from litematic.render.shapes.boxes import (
     Box,
@@ -281,7 +281,7 @@ def _wire(properties: Mapping[str, str]) -> np.ndarray:
         power = max(0, min(15, int(properties.get("power", "0"))))
     except (TypeError, ValueError):
         power = 0
-    r, g, b = redstone_tint(power)
+    r, g, b = _redstone_tint(power)
     line = f"block/redstone_dust_line0@{r},{g},{b}"
     dot = f"block/redstone_dust_dot@{r},{g},{b}"
     connected = [

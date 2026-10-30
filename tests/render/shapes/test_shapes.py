@@ -7,7 +7,9 @@ from litematic.render.errors import RenderError
 from litematic.render.quads import (
     QUAD_DTYPE,
     TIER_DOWN,
+    TIER_EAST,
     TIER_UP,
+    TIER_WEST,
     is_parallelogram,
     unit_cube_quads,
 )
@@ -51,6 +53,21 @@ def test_box_quads_auto_uv_tracks_box_extent():
     assert np.array_equal(
         south["uv"], np.array([(0, 8), (16, 8), (16, 16), (0, 16)], dtype="f4")
     )
+
+
+def test_box_auto_uv_west_east_follow_vanilla_axes():
+    quads = box_quads(2, 4, 6, 14, 12, 16)
+    for quad in quads:
+        tier = int(quad["shade"])
+        if tier not in (TIER_WEST, TIER_EAST):
+            continue
+        for (x, y, z), (u, v) in zip(
+            quad["vtx"].tolist(), quad["uv"].tolist()
+        ):
+            if tier == TIER_WEST:
+                assert (u, v) == (z, 16.0 - y)
+            else:
+                assert (u, v) == (16.0 - z, 16.0 - y)
 
 
 def test_slab_types_place_the_half_box():

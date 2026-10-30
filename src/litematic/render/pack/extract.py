@@ -27,7 +27,7 @@ from litematic.render.pack.texture import (
     _tint_for,
 )
 from litematic.render.quads import (
-    redstone_tint,
+    _redstone_tint,
     sort_quads,
     unit_cube_quads,
 )
@@ -248,6 +248,7 @@ def _extract_block(
         for variant in applies:
             x_rot = int(variant.get("x", 0))
             y_rot = int(variant.get("y", 0))
+            uvlock = bool(variant.get("uvlock", False))
             model = _cached_model(archive, names, ns, variant["model"], model_cache)
             if model is None:
                 continue
@@ -260,6 +261,7 @@ def _extract_block(
                 state_key,
                 x_rot,
                 y_rot,
+                uvlock,
                 texture_cache,
                 tex_arrays,
                 budget,
@@ -333,6 +335,7 @@ def _extract_parts(
             part["model"],
             part["x"],
             part["y"],
+            part["uvlock"],
             block_id,
             model_cache,
             texture_cache,
@@ -359,7 +362,7 @@ def _extract_parts(
             if raw is None:
                 continue
             for power in range(16):
-                tint = redstone_tint(power)
+                tint = _redstone_tint(power)
                 tex_arrays.setdefault(
                     f"{base}@{tint[0]},{tint[1]},{tint[2]}",
                     _apply_tint(raw, tint),
@@ -374,6 +377,7 @@ def _model_quads_key(
     ref: str,
     x_rot: int,
     y_rot: int,
+    uvlock: bool,
     block_id: str,
     model_cache: dict[str, dict[str, Any] | None],
     texture_cache: dict[str, np.ndarray | None],
@@ -383,7 +387,7 @@ def _model_quads_key(
     budget: _Budget,
 ) -> str | None:
     """Compile one part model's quads once, keyed by (ns, ref, rotation)."""
-    cache_key = f"{ns}|{ref}|x{x_rot}|y{y_rot}"
+    cache_key = f"{ns}|{ref}|x{x_rot}|y{y_rot}|u{int(uvlock)}"
     if cache_key in mquad_cache:
         return mquad_cache[cache_key]
     subkey = cache_key
@@ -415,6 +419,7 @@ def _model_quads_key(
                 x_rot,
                 y_rot,
                 texkey_for,
+                uvlock=uvlock,
             )
         else:
             quads = _stub_quads(
@@ -446,6 +451,7 @@ def _variant_quads(
     state_key: str,
     x_rot: int,
     y_rot: int,
+    uvlock: bool,
     texture_cache: dict[str, np.ndarray | None],
     tex_arrays: dict[str, np.ndarray],
     budget: _Budget,
@@ -485,7 +491,13 @@ def _variant_quads(
         )
 
     return _compile_elements(
-        model["elements"], model["textures"], ns, x_rot, y_rot, texkey_for
+        model["elements"],
+        model["textures"],
+        ns,
+        x_rot,
+        y_rot,
+        texkey_for,
+        uvlock=uvlock,
     )
 
 
@@ -494,6 +506,11 @@ _CHEST_STATE_KEYS = [
     f"facing={facing},type={kind}"
     for facing in ("north", "south", "east", "west")
     for kind in ("single", "left", "right")
+]
+
+# Vanilla ender chests have no type property: expand facing only.
+_ENDER_CHEST_STATE_KEYS = [
+    f"facing={facing}" for facing in ("north", "south", "east", "west")
 ]
 
 
@@ -526,8 +543,10 @@ def _chest_states(
 
     if chest_quads(block_id, "", resolve) is None:
         return {}
+    stem = block_id.partition(":")[2]
+    keys = _ENDER_CHEST_STATE_KEYS if stem == "ender_chest" else _CHEST_STATE_KEYS
     states: dict[str, tuple[np.ndarray, bool]] = {}
-    for key in _CHEST_STATE_KEYS:
+    for key in keys:
         quads = chest_quads(block_id, key, resolve)
         if quads is not None:
             states[key] = (quads, False)

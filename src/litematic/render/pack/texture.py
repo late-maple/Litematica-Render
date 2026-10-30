@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 from litematic.render.errors import RenderError
-from litematic.render.quads import redstone_tint
+from litematic.render.quads import _redstone_tint
 
 _VEC = {
     "up": (0, 1, 0),
@@ -254,7 +254,7 @@ def _tint_for(block_id: str, state_key: str) -> tuple[int, int, int] | None:
         # and pack.py rewrites the texkeys at lookup time.
         if not state_key:
             return None
-        return _redstone_tint(state_key)
+        return _redstone_state_tint(state_key)
     if "leaves" in path or path == "vine":
         return _TINTS["foliage"]
     if "grass" in path or "fern" in path:
@@ -263,7 +263,7 @@ def _tint_for(block_id: str, state_key: str) -> tuple[int, int, int] | None:
 
 
 
-def _redstone_tint(state_key: str) -> tuple[int, int, int]:
+def _redstone_state_tint(state_key: str) -> tuple[int, int, int]:
     power = 0
     for pair in state_key.split(","):
         if pair.startswith("power="):
@@ -271,7 +271,7 @@ def _redstone_tint(state_key: str) -> tuple[int, int, int]:
                 power = max(0, min(15, int(pair[len("power=") :])))
             except ValueError:
                 power = 0
-    return redstone_tint(power)
+    return _redstone_tint(power)
 
 
 
@@ -365,7 +365,7 @@ def _register_wire_dust(
         if raw is None:
             continue
         for power in range(16):
-            tint = redstone_tint(power)
+            tint = _redstone_tint(power)
             tex_arrays.setdefault(
                 f"{tex_key}@{tint[0]},{tint[1]},{tint[2]}",
                 _apply_tint(raw, tint),

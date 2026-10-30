@@ -19,7 +19,7 @@ from litematic.render.pack.extract import (
     _CacheWriteError,
     _extract_pack,
 )
-from litematic.render.quads import QUAD_DTYPE, redstone_tint
+from litematic.render.quads import QUAD_DTYPE, _redstone_tint
 
 __all__ = ["Textures", "load_pack"]
 
@@ -118,7 +118,7 @@ def _power_tinted(
         power = max(0, min(15, int(properties.get("power", "0"))))
     except (TypeError, ValueError):
         power = 0
-    r, g, b = redstone_tint(power)
+    r, g, b = _redstone_tint(power)
     out = quads.copy()
     keys = []
     for entry in out["texkey"]:

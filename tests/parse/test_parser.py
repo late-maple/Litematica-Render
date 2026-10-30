@@ -58,7 +58,7 @@ def test_two_regions_metadata_and_blocks():
     assert schem.metadata.total_volume == 100
     assert schem.metadata.time_created == 1234
     assert schem.metadata.time_modified == 5678
-    assert schem.metadata.data_version == 3337
+    assert schem.metadata.MinecraftDataVersion == 3337
     assert set(schem.regions) == {"Main", "Annex"}
 
     region = schem.regions["Main"]
@@ -79,14 +79,17 @@ def test_two_regions_metadata_and_blocks():
 def test_missing_optional_metadata_defaults():
     meta = {"Name": "OnlyName"}
     # EnclosingSize/Description/Author and counters all absent
-    data = build_litematic_bytes([_region()], metadata_overrides=meta)
+    data = build_litematic_bytes(
+        [_region()], metadata_overrides=meta, extra_root={"Version": 7}
+    )
     schem = loads(data)
     assert schem.metadata.name == "OnlyName"
     assert schem.metadata.author == ""
     assert schem.metadata.description == ""
     assert schem.metadata.enclosing_size == Vec3i(0, 0, 0)
     assert schem.metadata.total_blocks == 0
-    assert schem.metadata.data_version == 3337
+    assert schem.metadata.MinecraftDataVersion == 3337
+    assert schem.metadata.LitematicVersion == 7
 
 
 def test_negative_size_normalizes():

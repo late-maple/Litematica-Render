@@ -135,7 +135,7 @@ def test_packed_read_only_view_does_not_touch_caller_array():
 
 def test_regions_mapping_read_only():
     region = _make_region(lambda: np.zeros((2, 3, 4), dtype=np.uint16))
-    meta = LitematicMetadata("", "", "", Vec3i(0, 0, 0), 0, 0, 0, 0, 0)
+    meta = LitematicMetadata("", "", "", Vec3i(0, 0, 0), 0, 0, 0, 0, 0, 0)
     schem = Litematic(metadata=meta, regions={"Main": region})
     with pytest.raises(TypeError):
         schem.regions["other"] = region

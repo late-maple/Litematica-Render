@@ -103,7 +103,8 @@ def _parse_metadata(root: Mapping, source: str) -> LitematicMetadata:
             total_volume=int(meta.get("TotalVolume", 0)),
             time_created=int(meta.get("TimeCreated", 0)),
             time_modified=int(meta.get("TimeModified", 0)),
-            data_version=int(root.get("MinecraftDataVersion", 0)),
+            MinecraftDataVersion=int(root.get("MinecraftDataVersion", 0)),
+            LitematicVersion=int(root.get("Version",0))
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise LitematicFormatError(f"{source}: malformed Metadata: {exc}") from exc

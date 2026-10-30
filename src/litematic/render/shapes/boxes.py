@@ -5,6 +5,7 @@ from collections.abc import Mapping
 import numpy as np
 
 from litematic.render.quads import (
+    _CUBE_VTX,
     CULL_NONE,
     QUAD_DTYPE,
     TIER_DOWN,
@@ -19,16 +20,10 @@ __all__ = ["box_quads"]
 Box = tuple[float, float, float, float, float, float]
 _FACINGS = ("north", "south", "east", "west")
 
-# Face corner templates per tier (down/up/north/south/west/east) in the
-# pinned winding, mirroring quads._CUBE_VTX so a full-cube box matches the
-# quad core exactly (kept in sync by test_shapes).
-_FACE_CORNERS: tuple[tuple[tuple[int, int, int], ...], ...] = (
-    ((0, 0, 16), (16, 0, 16), (16, 0, 0), (0, 0, 0)),  # down
-    ((0, 16, 0), (16, 16, 0), (16, 16, 16), (0, 16, 16)),  # up
-    ((16, 16, 0), (0, 16, 0), (0, 0, 0), (16, 0, 0)),  # north
-    ((0, 16, 16), (16, 16, 16), (16, 0, 16), (0, 0, 16)),  # south
-    ((0, 16, 16), (0, 16, 0), (0, 0, 0), (0, 0, 16)),  # west
-    ((16, 16, 0), (16, 16, 16), (16, 0, 16), (16, 0, 0)),  # east
+# Per-tier corner templates derived from quads._CUBE_VTX.
+_FACE_CORNERS: tuple[tuple[tuple[int, int, int], ...], ...] = tuple(
+    tuple((int(c[0]), int(c[1]), int(c[2])) for c in corners)
+    for corners in _CUBE_VTX
 )
 
 # Panels keyed by facing: open trapdoors rest on the facing edge, closed
@@ -111,8 +106,8 @@ def _auto_uv(tier: int, x: float, y: float, z: float) -> tuple[float, float]:
     if tier == TIER_SOUTH:
         return (x, 16.0 - y)
     if tier == TIER_WEST:
-        return (16.0 - z, 16.0 - y)
-    return (z, 16.0 - y)
+        return (z, 16.0 - y)
+    return (16.0 - z, 16.0 - y)
 
 
 def _combine(boxes: list[Box]) -> np.ndarray:

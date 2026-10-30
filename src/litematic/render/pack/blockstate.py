@@ -102,6 +102,7 @@ def _parse_blockstate(
                         "when": record_when,
                         "x": int(entry.get("x", 0)),
                         "y": int(entry.get("y", 0)),
+                        "uvlock": bool(entry.get("uvlock", False)),
                     }
                     parts.append(record)
     refs = [v["model"] for _, applies in out for v in applies]

@@ -43,7 +43,8 @@ class LitematicMetadata:
     total_volume: int
     time_created: int
     time_modified: int
-    data_version: int
+    MinecraftDataVersion: int
+    LitematicVersion: int
 
 
 @dataclass(frozen=True)

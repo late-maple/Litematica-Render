@@ -30,6 +30,7 @@ Thumbs.db
 AGENTS.md
 docs/
 test/
+.scratch
 
 # Superpowers SDD workspace
 .superpowers/
