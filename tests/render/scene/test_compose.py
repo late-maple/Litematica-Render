@@ -7,7 +7,12 @@ import numpy as np
 from helpers.litematica_packer import build_litematic_bytes
 
 from litematic import loads
-from litematic.render.pack import Textures, load_pack
+from litematic.render.pack import load_pack
+from litematic.render.pack.resolve import (
+    _MAGENTA_TEXKEY,
+    Resolver,
+    _backfill_builtin,
+)
 from litematic.render.quads import (
     QUAD_DTYPE,
     TIER_EAST,
@@ -16,12 +21,7 @@ from litematic.render.quads import (
     unit_cube_quads,
 )
 from litematic.render.scene import isometric as isometric_mod
-from litematic.render.scene.isometric import (
-    _MAGENTA_TEXKEY,
-    _backfill_builtin,
-    _compose,
-    _vertex_ao,
-)
+from litematic.render.scene.isometric import _compose, _vertex_ao
 from litematic.render.shapes import builtin_quads
 
 _STONE = (140, 140, 140, 255)
@@ -29,7 +29,7 @@ _STONE = (140, 140, 140, 255)
 
 def _textures(occl):
     """Stone cube pack whose opaque flag is the given boolean."""
-    return Textures(
+    return Resolver(
         version="pack-quads",
         arrays={"block/stone": np.full((16, 16, 4), _STONE, np.uint8)},
         quads_map={"minecraft:stone[]": unit_cube_quads("block/stone")},
@@ -135,7 +135,7 @@ def test_yaw_remaps_tier_and_vertices():
     quads["texkey"] = "block/stone"
     quads["shade"] = TIER_SOUTH
     quads["dbl"] = False
-    tex = Textures(
+    tex = Resolver(
         version="pack-quads",
         arrays={"block/stone": np.zeros((16, 16, 4), np.uint8)},
         quads_map={"minecraft:stone[]": quads},
@@ -220,7 +220,7 @@ def test_air_at_nonzero_palette_index_excluded():
 
 
 def test_yaw_rotation_quadrants():
-    tex = Textures(
+    tex = Resolver(
         version="pack-quads",
         arrays={
             "block/stone": np.full((16, 16, 4), _STONE, np.uint8),
@@ -331,7 +331,7 @@ def test_dbl_quads_keep_full_ao_next_to_occluders():
     plant["texkey"] = "block/stone"
     plant["shade"] = TIER_UP
     plant["dbl"] = True
-    tex = Textures(
+    tex = Resolver(
         version="pack-quads",
         arrays={"block/stone": np.full((16, 16, 4), _STONE, np.uint8)},
         quads_map={
@@ -631,7 +631,7 @@ def _pair_pack(entries):
         arrays[texkey] = np.full((16, 16, 4), _STONE, np.uint8)
         quads_map[f"{name}[]"] = _cull_cube(texkey)
         occl_map[f"{name}[]"] = occl
-    return Textures(
+    return Resolver(
         version="pack-quads",
         arrays=arrays,
         quads_map=quads_map,
@@ -973,7 +973,7 @@ def test_slab_boundary_ao_and_cull():
             ]
         )
     )
-    plain_textures = Textures(
+    plain_textures = Resolver(
         version="pack-quads",
         arrays={
             "block/plain": np.full((16, 16, 4), _STONE, np.uint8),

@@ -1,13 +1,12 @@
 """Scene composition: quad expansion, yaw remap, camera filtering, AO."""
 
-from typing import Mapping, NamedTuple
+from typing import NamedTuple
 
 import numpy as np
 
 from litematic.parse.model import Litematic
 from litematic.render.errors import RenderError
-from litematic.render.pack import Textures
-from litematic.render.pack.texture import _tint_for
+from litematic.render.pack.resolve import Resolver
 from litematic.render.quads import (
     AO_LEVELS,
     CULL_NONE,
@@ -17,16 +16,11 @@ from litematic.render.quads import (
     TIER_SOUTH,
     TIER_UP,
     TIER_WEST,
-    unit_cube_quads,
 )
-from litematic.render.shapes import builtin_quads
 
 _AIR_NAMES = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air"}
 _WATER_FAMILY = {"minecraft:water", "minecraft:bubble_column"}
 _Y_SLAB = 64
-_MAGENTA_TEXKEY = "__magenta__"
-_MAGENTA_ARRAY = np.full((16, 16, 4), (255, 0, 255, 255), np.uint8)
-_MAGENTA_ARRAY.flags.writeable = False  # painter must never mutate in place
 _CAMERA_TIERS = (TIER_UP, TIER_SOUTH, TIER_EAST)
 
 # Face normal vectors per tier in block space; AO samples sit one step out
@@ -152,7 +146,7 @@ def _new_arena(capacity: int) -> _Arena:
     )
 
 
-def _compose(schem: Litematic, yaw: int, textures: Textures) -> _Scene:
+def _compose(schem: Litematic, yaw: int, textures: Resolver) -> _Scene:
     """Collect visible blocks from all regions into a quad scene."""
     try:
         return _compose_inner(schem, yaw, textures)
@@ -162,7 +156,7 @@ def _compose(schem: Litematic, yaw: int, textures: Textures) -> _Scene:
         raise RenderError(f"compose: scene composition failed: {exc}") from exc
 
 
-def _compose_inner(schem: Litematic, yaw: int, textures: Textures) -> _Scene:
+def _compose_inner(schem: Litematic, yaw: int, textures: Resolver) -> _Scene:
     """Expand every region's visible cells into yawed, filtered quads.
 
     Pass A stashes per-slab visible cells and counts the exact camera-facing
@@ -280,7 +274,7 @@ def _cull_classes(palette) -> np.ndarray:
 
 
 def _palette_luts(
-    palette, textures: Textures, key_ids: dict[str, int], key_arrays: dict
+    palette, textures: Resolver, key_ids: dict[str, int], key_arrays: dict
 ) -> _Luts:
     """Resolve every palette entry to quads, occl flags, and texkey ids."""
     count = len(palette)
@@ -294,11 +288,11 @@ def _palette_luts(
         if state.name in _AIR_NAMES:
             is_air[i] = True
             continue
-        occludes[i] = textures.occludes(state.name, state.properties)
-        quads = _state_quads(state, textures)
-        quads_pieces.append(quads)
-        id_pieces.append(_texkey_ids(quads, textures, key_ids, key_arrays))
-        lengths[i + 1] = len(quads)
+        res = textures.resolve(state)
+        occludes[i] = res.occludes
+        quads_pieces.append(res.quads)
+        id_pieces.append(_texkey_ids(res.quads, textures, key_ids, key_arrays))
+        lengths[i + 1] = len(res.quads)
     if not quads_pieces:
         return _Luts(
             is_air, occludes, None, np.cumsum(lengths), np.zeros(0, np.int32),
@@ -311,189 +305,22 @@ def _palette_luts(
     return _Luts(is_air, occludes, pool, np.cumsum(lengths), ids, cull_class)
 
 
-def _state_quads(state, textures: Textures) -> np.ndarray:
-    """Resolve one state: pack quads, builtin shapes, then magenta cube."""
-    quads = textures.quads(state.name, state.properties)
-    if quads is not None:
-        return quads
-    variants: tuple[Mapping[str, str], ...] = (state.properties, {})
-    for props in variants:
-        built = builtin_quads(state.name, props)
-        if built is not None:
-            if _backfill_builtin(state.name, built, textures.arrays):
-                return built
-            break
-    return unit_cube_quads(_MAGENTA_TEXKEY)
-
-
-# Vanilla base-material texture conventions for model-less packs (v2.1
-# extension point, hand-maintained): family suffix stripped to the base
-# material, woods to their planks, dye carpets to wool, plus the vanilla
-# plural form as a second candidate. Longest suffixes must come first.
-_FAMILY_SUFFIXES: tuple[str, ...] = (
-    "_pressure_plate",
-    "_fence_gate",
-    "_wall_banner",
-    "_wall_sign",
-    "_trapdoor",
-    "_button",
-    "_stairs",
-    "_fence",
-    "_carpet",
-    "_slab",
-    "_wall",
-    "_sign",
-    "_banner",
-    "_door",
-)
-_WOODS = frozenset(
-    {
-        "oak",
-        "spruce",
-        "birch",
-        "jungle",
-        "acacia",
-        "dark_oak",
-        "mangrove",
-        "cherry",
-        "bamboo",
-        "crimson",
-        "warped",
-    }
-)
-_DYES = frozenset(
-    {
-        "white",
-        "orange",
-        "magenta",
-        "light_blue",
-        "yellow",
-        "lime",
-        "pink",
-        "gray",
-        "light_gray",
-        "cyan",
-        "purple",
-        "blue",
-        "brown",
-        "green",
-        "red",
-        "black",
-    }
-)
-
-
-def _backfill_builtin(
-    name: str, quads: np.ndarray, arrays: dict[str, np.ndarray]
-) -> bool:
-    """Fill builtin quads' texkeys from direct, then material, keys.
-
-    Builders may emit final per-quad texkeys (wire power tints); those
-    pass through when every key resolves in the arrays. Direct matches
-    (same-name plus tint variant, extraction-registered) always win; the
-    vanilla naming conventions fire only when no direct texture exists,
-    and unresolved families fall through to magenta.
-    """
-    if np.all(quads["texkey"] != ""):
-        return all(str(key) in arrays for key in quads["texkey"])
-    ns, _, stem = name.partition(":")
-    prefix = "" if ns in ("", "minecraft") else f"{ns}:"
-    base = f"{prefix}block/{stem or name}"
-    tint = _tint_for(name, "")
-    direct = [base]
-    if tint is not None:
-        direct.insert(0, f"{base}@{tint[0]},{tint[1]},{tint[2]}")
-    for key in direct:
-        if key in arrays:
-            quads["texkey"] = key
-            return True
-    door = _door_texkeys(prefix, stem)
-    if door is not None and all(key in arrays for key in door):
-        quads["texkey"] = np.where(
-            quads["vtx"][..., 1].mean(axis=1) >= 8.0, door[0], door[1]
-        )
-        return True
-    for key in _material_keys(prefix, stem):
-        if key in arrays:
-            quads["texkey"] = key
-            return True
-    return False
-
-
-def _door_texkeys(prefix: str, stem: str) -> tuple[str, str] | None:
-    """(top, bottom) texture keys for a vanilla door stem, else None."""
-    if not stem.endswith("_door"):
-        return None
-    material = stem[: -len("_door")]
-    return (
-        f"{prefix}block/{material}_door_top",
-        f"{prefix}block/{material}_door_bottom",
-    )
-
-
-def _material_keys(prefix: str, stem: str) -> tuple[str, ...]:
-    """Ordered base-material texture keys per vanilla naming rules."""
-    if stem.endswith("_pane"):
-        # Vanilla pane models texture from <stem>_top; the bare glass is
-        # the second chance.
-        material = stem[: -len("_pane")]
-        return (
-            f"{prefix}block/{stem}_top",
-            f"{prefix}block/{material}",
-            f"{prefix}block/{material}s",
-        )
-    for suffix in _FAMILY_SUFFIXES:
-        if stem.endswith(suffix):
-            material = stem[: -len(suffix)]
-            break
-    else:
-        return ()
-    if material in _WOODS:
-        return (f"{prefix}block/{material}_planks",)
-    if suffix == "_carpet" and material in _DYES:
-        return (f"{prefix}block/{material}_wool",)
-    return (f"{prefix}block/{material}", f"{prefix}block/{material}s")
-
-
-def _state_is_magenta(state, textures: Textures) -> bool:
-    """True when compose resolves this state to the magenta fallback cube."""
-    quads = _state_quads(state, textures)
-    return bool(np.any(quads["texkey"] == _MAGENTA_TEXKEY))
-
-
 def _texkey_ids(
     quads: np.ndarray,
-    textures: Textures,
+    textures: Resolver,
     key_ids: dict[str, int],
     key_arrays: dict,
 ) -> np.ndarray:
     """Map a quad array's texkeys to shared scene ids, registering arrays."""
     unique, inverse = np.unique(quads["texkey"], return_inverse=True)
-    lut = np.array(
-        [_register_key(str(key), textures, key_ids, key_arrays) for key in unique],
-        np.int32,
-    )
+    keys = [str(key) for key in unique]
+    fresh = [key for key in keys if key not in key_ids]
+    arrays = textures.texkey_arrays(fresh)
+    for key in fresh:
+        key_ids[key] = len(key_ids)
+        key_arrays[key] = arrays[key]
+    lut = np.array([key_ids[key] for key in keys], np.int32)
     return lut[inverse.reshape(-1)]
-
-
-def _register_key(
-    key: str,
-    textures: Textures,
-    key_ids: dict[str, int],
-    key_arrays: dict,
-) -> int:
-    """Assign a stable id and texture array to a texkey on first sight."""
-    if key in key_ids:
-        return key_ids[key]
-    if key == _MAGENTA_TEXKEY:
-        array = _MAGENTA_ARRAY
-    elif key in textures.arrays:
-        array = textures.arrays[key]
-    else:
-        raise RenderError(f"compose: quad texkey missing from pack arrays: {key}")
-    key_ids[key] = len(key_ids)
-    key_arrays[key] = array
-    return key_ids[key]
 
 
 def _occlusion_window(

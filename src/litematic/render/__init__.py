@@ -8,11 +8,7 @@ from litematic.parse.model import Litematic
 from litematic.render.errors import RenderError
 from litematic.render.pack import load_pack
 from litematic.render.png import encode_png
-from litematic.render.scene.isometric import (
-    _AIR_NAMES,
-    _compose,
-    _state_is_magenta,
-)
+from litematic.render.scene.isometric import _AIR_NAMES, _compose
 from litematic.render.scene.painter import _choose_scale, _downsample, _paint
 
 __all__ = [
@@ -102,7 +98,7 @@ def unresolved_colors(
         for region in schem.regions.values()
         for state in region.palette
         if state.name not in _AIR_NAMES
-        and _state_is_magenta(state, textures)
+        and textures.resolve(state).miss is not None
     }
 
 

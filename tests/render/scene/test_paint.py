@@ -6,7 +6,7 @@ from helpers.litematica_packer import build_litematic_bytes
 
 from litematic import loads
 from litematic.render.errors import RenderError
-from litematic.render.pack import Textures
+from litematic.render.pack.resolve import Resolver
 from litematic.render.quads import QUAD_DTYPE, TIER_SOUTH, unit_cube_quads
 from litematic.render.scene import painter as painter_mod
 from litematic.render.scene.isometric import _compose
@@ -34,7 +34,7 @@ def _textures(entries):
             alpha = spec[3]
         quads_map[f"{name}[]"] = unit_cube_quads(key)
         occl_map[f"{name}[]"] = alpha >= 250
-    return Textures(
+    return Resolver(
         version="pack-quads",
         arrays=arrays,
         quads_map=quads_map,
@@ -52,7 +52,7 @@ TEX = _textures({"minecraft:stone": _STONE, "minecraft:glass": _GLASS})
 def _raw_quad_pack(quads, color):
     """Pack exposing one raw quad array backed by a uniform texture."""
     key = str(quads["texkey"][0])
-    return Textures(
+    return Resolver(
         version="pack-quads",
         arrays={key: np.full((16, 16, 4), color, np.uint8)},
         quads_map={"minecraft:odd[]": quads},
@@ -119,7 +119,7 @@ def test_ao_darkens_wall_base_pixels():
 
 def test_cross_plant_renders_double_sided():
     arrays = {"block/short_grass": np.full((16, 16, 4), _PLANT, np.uint8)}
-    tex = Textures(
+    tex = Resolver(
         version="pack-quads",
         arrays=arrays,
         quads_map={},
@@ -402,7 +402,7 @@ def test_equal_depth_preserves_index_order():
     early = unit_cube_quads("block/early")[TIER_SOUTH : TIER_SOUTH + 1].copy()
     late = unit_cube_quads("block/late")[TIER_SOUTH : TIER_SOUTH + 1].copy()
     quads = np.concatenate([early, late])
-    textures = Textures(
+    textures = Resolver(
         version="pack-quads",
         arrays={
             "block/early": np.full((16, 16, 4), (255, 0, 0, 255), np.uint8),

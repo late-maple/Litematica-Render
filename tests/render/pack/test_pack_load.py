@@ -9,10 +9,17 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from litematic.parse.model import BlockState
 from litematic.render.errors import RenderError
-from litematic.render.pack import Textures, load_pack
+from litematic.render.pack import load_pack
 from litematic.render.pack import loader as pack_mod
+from litematic.render.pack.resolve import Resolver
 from litematic.render.quads import TIER_EAST, TIER_SOUTH, TIER_UP, unit_cube_quads
+
+
+def _resolve(textures, name, properties=None):
+    """Resolve through the public seam; miss marks the magenta fallback."""
+    return textures.resolve(BlockState(name, properties or {}))
 
 
 def _png(color, size=(16, 16)):
@@ -58,13 +65,13 @@ _FACE_NAMES = ("down", "up", "north", "south", "west", "east")
 def test_first_load_extracts_and_caches(tmp_path):
     pack_file = _mini_pack(tmp_path / "pack.zip")
     textures = load_pack(pack_file)
-    assert isinstance(textures, Textures)
+    assert isinstance(textures, Resolver)
     assert textures.version == "pack-quads.1"
     assert (tmp_path / "pack.litematic-tex.npz").is_file()
-    quads = textures.quads("minecraft:stone", {})
-    assert quads is not None
-    assert len(quads) == 6
-    assert textures.occludes("minecraft:stone", {})
+    res = _resolve(textures, "minecraft:stone")
+    assert res.miss is None
+    assert len(res.quads) == 6
+    assert res.occludes
 
 
 def test_second_load_reuses_cache(tmp_path):
@@ -77,7 +84,7 @@ def test_second_load_reuses_cache(tmp_path):
     finally:
         pack_mod._extract_pack = counter.real
     assert counter.calls == 0
-    assert textures.quads("minecraft:stone", {}) is not None
+    assert _resolve(textures, "minecraft:stone").miss is None
 
 
 def test_pack_mtime_change_forces_reextract(tmp_path):
@@ -91,9 +98,9 @@ def test_pack_mtime_change_forces_reextract(tmp_path):
     finally:
         pack_mod._extract_pack = counter.real
     assert counter.calls == 2
-    quads = textures.quads("minecraft:stone", {})
-    assert quads is not None
-    key = str(quads["texkey"][0])
+    res = _resolve(textures, "minecraft:stone")
+    assert res.miss is None
+    key = str(res.quads["texkey"][0])
     assert (textures.arrays[key] == (10, 200, 10, 255)).all()
 
 
@@ -108,7 +115,7 @@ def test_corrupt_cache_rebuilt(tmp_path):
     finally:
         pack_mod._extract_pack = counter.real
     assert counter.calls == 1
-    assert textures.quads("minecraft:stone", {}) is not None
+    assert _resolve(textures, "minecraft:stone").miss is None
 
 
 def test_cache_missing_meta_version_rebuilt(tmp_path):
@@ -140,7 +147,7 @@ def test_bad_shape_entry_dropped(tmp_path, monkeypatch):
     finally:
         pack_mod._extract_pack = counter.real
     assert "minecraft:stone[]" not in textures.quads_map
-    assert textures.quads("minecraft:stone", {}) is None
+    assert _resolve(textures, "minecraft:stone").miss is not None
 
 
 def test_quads_entry_with_unknown_texkey_dropped(tmp_path):
@@ -152,8 +159,8 @@ def test_quads_entry_with_unknown_texkey_dropped(tmp_path):
     np.savez(cache, **data)
     pack_mod._PACK_CACHE.clear()
     textures = load_pack(pack_file)
-    assert textures.quads("minecraft:ghost", {}) is None
-    assert textures.quads("minecraft:stone", {}) is not None
+    assert _resolve(textures, "minecraft:ghost").miss is not None
+    assert _resolve(textures, "minecraft:stone").miss is None
 
 
 def test_state_lookup_with_fallback(tmp_path):
@@ -181,19 +188,19 @@ def test_state_lookup_with_fallback(tmp_path):
         for name, data in entries.items():
             zf.writestr(name, data)
     textures = load_pack(tmp_path / "p2.zip")
-    quads = textures.quads("minecraft:thing", {"facing": "south"})
-    assert quads is not None
-    by_tier = {int(q["shade"]): str(q["texkey"]) for q in quads}
+    res = _resolve(textures, "minecraft:thing", {"facing": "south"})
+    assert res.miss is None
+    by_tier = {int(q["shade"]): str(q["texkey"]) for q in res.quads}
     assert by_tier[TIER_UP] == "block/up"
     assert by_tier[TIER_EAST] == "block/east"
     assert by_tier[TIER_SOUTH] == "block/south"
     assert (textures.arrays["block/up"] == (1, 2, 3, 255)).all()
-    assert textures.quads("minecraft:thing", {"facing": "west"}) is None
-    assert textures.quads("minecraft:plain", {"anything": "x"}) is not None
-    assert textures.quads("minecraft:absent", {}) is None
-    assert not textures.occludes("minecraft:thing", {"facing": "south"})
-    assert not textures.occludes("minecraft:plain", {})
-    assert not textures.occludes("minecraft:absent", {})
+    assert _resolve(textures, "minecraft:thing", {"facing": "west"}).miss is not None
+    assert _resolve(textures, "minecraft:plain", {"anything": "x"}).miss is None
+    assert _resolve(textures, "minecraft:absent").miss is not None
+    assert not _resolve(textures, "minecraft:thing", {"facing": "south"}).occludes
+    assert not _resolve(textures, "minecraft:plain").occludes
+    assert not _resolve(textures, "minecraft:absent").occludes
 
 
 def test_missing_pack_raises(tmp_path):
@@ -218,7 +225,7 @@ def test_corrupt_cache_member_auto_rebuilds(tmp_path, monkeypatch):
     finally:
         pack_mod._extract_pack = counter.real
     assert counter.calls == 1
-    assert textures.quads("minecraft:stone", {}) is not None
+    assert _resolve(textures, "minecraft:stone").miss is None
 
 
 def test_unwritable_cache_falls_back_to_tempdir(tmp_path, monkeypatch):
@@ -239,7 +246,7 @@ def test_unwritable_cache_falls_back_to_tempdir(tmp_path, monkeypatch):
     assert len(calls) == 2
     assert calls[0].name == "pack.litematic-tex.npz"
     assert calls[1].parent != calls[0].parent
-    assert textures.quads("minecraft:stone", {}) is not None
+    assert _resolve(textures, "minecraft:stone").miss is None
 
 
 def test_vanished_pack_raises_render_error(tmp_path, monkeypatch):
@@ -283,7 +290,7 @@ def test_old_cache_version_rebuilds(tmp_path, monkeypatch):
         pack_mod._extract_pack = counter.real
     assert counter.calls == 1
     assert textures.version == "pack-quads.1"
-    assert textures.quads("minecraft:stone", {}) is not None
+    assert _resolve(textures, "minecraft:stone").miss is None
 
 
 def test_load_pack_missing_pillow_still_render_error(tmp_path, monkeypatch):
@@ -356,24 +363,25 @@ def test_quads_match_ignores_extra_state_properties(tmp_path):
     }
     pack = _make_pack(pack, entries)
     textures = load_pack(pack)
-    quads = textures.quads(
-        "minecraft:thing", {"facing": "north", "waterlogged": "false"}
+    res = _resolve(
+        textures, "minecraft:thing", {"facing": "north", "waterlogged": "false"}
     )
-    assert quads is not None
-    assert len(quads) == 6
+    assert res.miss is None
+    assert len(res.quads) == 6
 
 
 def test_quads_most_specific_key_wins(tmp_path):
     textures = load_pack(_partial_key_pack(tmp_path / "p.zip"))
-    quads = textures.quads(
+    res = _resolve(
+        textures,
         "minecraft:thing",
         {"facing": "north", "half": "bottom", "waterlogged": "false"},
     )
-    assert quads is not None
-    assert set(str(k) for k in quads["texkey"]) == {"block/tex_b"}
-    loose = textures.quads("minecraft:thing", {"facing": "north"})
-    assert loose is not None
-    assert set(str(k) for k in loose["texkey"]) == {"block/tex_a"}
+    assert res.miss is None
+    assert set(str(k) for k in res.quads["texkey"]) == {"block/tex_b"}
+    loose = _resolve(textures, "minecraft:thing", {"facing": "north"})
+    assert loose.miss is None
+    assert set(str(k) for k in loose.quads["texkey"]) == {"block/tex_a"}
 
 
 def test_quads_conflicting_value_not_matched(tmp_path):
@@ -396,10 +404,12 @@ def test_quads_conflicting_value_not_matched(tmp_path):
     }
     textures = load_pack(_make_pack(tmp_path / "p.zip", entries))
     assert (
-        textures.quads("minecraft:thing", {"waterlogged": "false"}) is None
+        _resolve(textures, "minecraft:thing", {"waterlogged": "false"}).miss
+        is not None
     )
     assert (
-        textures.quads("minecraft:thing", {"waterlogged": "true"}) is not None
+        _resolve(textures, "minecraft:thing", {"waterlogged": "true"}).miss
+        is None
     )
 
 
@@ -423,9 +433,9 @@ def test_occludes_match_ignores_extra_state_properties(tmp_path):
         "assets/minecraft/textures/block/stone.png": _png((1, 2, 3)),
     }
     textures = load_pack(_make_pack(pack, entries))
-    assert textures.occludes(
-        "minecraft:thing", {"facing": "north", "waterlogged": "false"}
-    )
+    assert _resolve(
+        textures, "minecraft:thing", {"facing": "north", "waterlogged": "false"}
+    ).occludes
 
 
 def test_multipart_malformed_when_matches_nothing(tmp_path):
@@ -451,9 +461,9 @@ def test_multipart_malformed_when_matches_nothing(tmp_path):
         "assets/minecraft/textures/block/tex.png": _png((1, 2, 3)),
     }
     textures = load_pack(_make_pack(tmp_path / "p.zip", entries))
-    quads = textures.quads("minecraft:thing", {"facing": "north"})
-    assert quads is not None
-    assert len(quads) == 6
+    res = _resolve(textures, "minecraft:thing", {"facing": "north"})
+    assert res.miss is None
+    assert len(res.quads) == 6
 
 
 def test_native_shape_cache_accepted(tmp_path, monkeypatch):
@@ -487,10 +497,10 @@ def test_native_texture_pack_renders_quads(tmp_path):
             zf.writestr(name, blob)
     textures = load_pack(tmp_path / "p.zip")
     assert textures.arrays["block/stone"].shape == (32, 32, 4)
-    assert textures.quads("minecraft:stone", {}) is not None
+    assert _resolve(textures, "minecraft:stone").miss is None
 
 
-# Process cache returns the same Textures; a changed mtime reloads.
+# Process cache returns the same Resolver; a changed mtime reloads.
 
 
 def test_pack_cache_reuses_within_process(tmp_path, monkeypatch):
@@ -519,6 +529,7 @@ def test_pack_cache_invalidates_on_mtime(tmp_path, monkeypatch):
     finally:
         pack_mod._extract_pack = counter.real
     assert counter.calls == 2
-    quads = changed.quads("minecraft:stone", {})
-    key = str(quads["texkey"][0])
+    res = _resolve(changed, "minecraft:stone")
+    assert res.miss is None
+    key = str(res.quads["texkey"][0])
     assert (changed.arrays[key] == (10, 200, 10, 255)).all()

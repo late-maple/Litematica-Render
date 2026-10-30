@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 
 from litematic.render.errors import RenderError
+from litematic.render.pack.resolve import _tint_for
 from litematic.render.quads import _redstone_tint
 
 _VEC = {
@@ -41,14 +42,6 @@ class _Budget:
             return False
         self.bytes += size
         return True
-
-
-
-_TINTS: dict[str, tuple[int, int, int]] = {
-    "grass": (145, 189, 89),
-    "foliage": (119, 171, 47),
-    "water": (63, 118, 228),
-}
 
 
 
@@ -241,37 +234,6 @@ def _decode_png(data: bytes, animated: bool) -> Any:
 def _apply_tint(array: np.ndarray, tint: tuple[int, int, int]) -> np.ndarray:
     factor = np.array(tint + (255,), dtype=np.uint16)
     return ((array.astype(np.uint16) * factor) // 255).astype(np.uint8)
-
-
-
-def _tint_for(block_id: str, state_key: str) -> tuple[int, int, int] | None:
-    path = block_id.split(":", 1)[-1]
-    if path == "water" or path == "bubble_column":
-        return _TINTS["water"]
-    if path == "redstone_wire":
-        # An empty state key marks the multipart part path: the dust tint
-        # depends on the live power, so the base texture ships untinted
-        # and pack.py rewrites the texkeys at lookup time.
-        if not state_key:
-            return None
-        return _redstone_state_tint(state_key)
-    if "leaves" in path or path == "vine":
-        return _TINTS["foliage"]
-    if "grass" in path or "fern" in path:
-        return _TINTS["grass"]
-    return None
-
-
-
-def _redstone_state_tint(state_key: str) -> tuple[int, int, int]:
-    power = 0
-    for pair in state_key.split(","):
-        if pair.startswith("power="):
-            try:
-                power = max(0, min(15, int(pair[len("power=") :])))
-            except ValueError:
-                power = 0
-    return _redstone_tint(power)
 
 
 

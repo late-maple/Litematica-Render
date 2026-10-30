@@ -15,6 +15,7 @@ from litematic.render.pack.elements import (
     _unit_cube_occl,
 )
 from litematic.render.pack.entities import chest_quads
+from litematic.render.pack.resolve import _tint_for
 from litematic.render.pack.texture import (
     _apply_tint,
     _Budget,
@@ -24,7 +25,6 @@ from litematic.render.pack.texture import (
     _register_wire_dust,
     _resolve_ref,
     _texture_key,
-    _tint_for,
 )
 from litematic.render.quads import (
     _redstone_tint,

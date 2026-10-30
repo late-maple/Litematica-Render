@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from litematic.parse.model import BlockState
 from litematic.render.errors import RenderError
 from litematic.render.pack import load_pack
 from litematic.render.pack.elements import _FACE_GEOM, _compile_elements
@@ -29,6 +30,11 @@ from litematic.render.quads import (
     sort_quads,
     unit_cube_quads,
 )
+
+
+def _resolve(textures, name, properties=None):
+    """Resolve through the public seam; miss marks the magenta fallback."""
+    return textures.resolve(BlockState(name, properties or {}))
 
 
 def _solid_png(color, size=(16, 16)):
@@ -1081,11 +1087,11 @@ def test_ender_chest_live_state_resolves(tmp_path):
     }
     pack = _make_pack(tmp_path / "pack.zip", entries)
     textures = load_pack(pack)
-    quads = textures.quads(
-        "minecraft:ender_chest", {"facing": "west", "waterlogged": "true"}
+    res = _resolve(
+        textures, "minecraft:ender_chest", {"facing": "west", "waterlogged": "true"}
     )
-    assert quads is not None
-    assert len(quads)
+    assert res.miss is None
+    assert len(res.quads)
 
 
 def test_plain_chest_keeps_type_expanded_states(tmp_path):
@@ -1562,9 +1568,9 @@ def test_multipart_conditional_parts_merge_per_state(tmp_path):
     record = json.loads(str(data["parts/minecraft:gate"].item()))
     assert [p["when"] for p in record["parts"]] == [None, {"north": "true"}]
     textures = load_pack(pack_file)
-    off = textures.quads("minecraft:gate", {"north": "false"})
+    off = _resolve(textures, "minecraft:gate", {"north": "false"}).quads
     assert sorted(str(k) for k in off["texkey"]) == ["block/post"]
-    on = textures.quads("minecraft:gate", {"north": "true"})
+    on = _resolve(textures, "minecraft:gate", {"north": "true"}).quads
     assert sorted(str(k) for k in on["texkey"]) == ["block/arm", "block/post"]
 
 
@@ -1575,10 +1581,10 @@ def test_multipart_all_conditional_evaluates_per_state(tmp_path):
     pack_file = _make_pack(tmp_path / "pack.zip", entries)
     _extract(tmp_path, entries)
     textures = load_pack(pack_file)
-    on = textures.quads("minecraft:gate", {"north": "true"})
+    on = _resolve(textures, "minecraft:gate", {"north": "true"}).quads
     assert sorted(str(k) for k in on["texkey"]) == ["block/arm"]
     # A state matching no condition has no part geometry and no [] key.
-    assert textures.quads("minecraft:gate", {"north": "false"}) is None
+    assert _resolve(textures, "minecraft:gate", {"north": "false"}).miss is not None
 
 
 def test_multipart_unconditional_parts_union(tmp_path):
@@ -1588,7 +1594,7 @@ def test_multipart_unconditional_parts_union(tmp_path):
     pack_file = _make_pack(tmp_path / "pack.zip", entries)
     _extract(tmp_path, entries)
     textures = load_pack(pack_file)
-    quads = textures.quads("minecraft:gate", {})
+    quads = _resolve(textures, "minecraft:gate").quads
     assert sorted({str(k) for k in quads["texkey"]}) == [
         "block/arm",
         "block/post",
@@ -1609,7 +1615,7 @@ def test_multipart_unconditional_apply_list_union(tmp_path):
     pack_file = _make_pack(tmp_path / "pack.zip", entries)
     _extract(tmp_path, entries)
     textures = load_pack(pack_file)
-    quads = textures.quads("minecraft:gate", {})
+    quads = _resolve(textures, "minecraft:gate").quads
     assert sorted({str(k) for k in quads["texkey"]}) == [
         "block/arm",
         "block/post",
@@ -1621,7 +1627,7 @@ def test_multipart_single_unconditional_part(tmp_path):
     pack_file = _make_pack(tmp_path / "pack.zip", entries)
     _extract(tmp_path, entries)
     textures = load_pack(pack_file)
-    quads = textures.quads("minecraft:gate", {})
+    quads = _resolve(textures, "minecraft:gate").quads
     assert set(str(k) for k in quads["texkey"]) == {"block/post"}
 
 
@@ -1677,9 +1683,9 @@ def test_vanilla_fence_geometry_comes_from_multipart_merge(tmp_path):
     textures = load_pack(pack_file)
     # The model's own planks texture resolves inline; the same-name file
     # never participates. north=false renders the post model alone.
-    alone = textures.quads("minecraft:oak_fence", {"north": "false"})
+    alone = _resolve(textures, "minecraft:oak_fence", {"north": "false"}).quads
     assert [str(k) for k in alone["texkey"]] == ["block/oak_planks"]
-    linked = textures.quads("minecraft:oak_fence", {"north": "true"})
+    linked = _resolve(textures, "minecraft:oak_fence", {"north": "true"}).quads
     assert sorted(str(k) for k in linked["texkey"]) == [
         "block/oak_planks"
     ] * 2
@@ -1690,7 +1696,7 @@ def test_vanilla_fence_without_same_name_texture_still_resolves(tmp_path):
     pack_file = _make_pack(tmp_path / "pack.zip", entries)
     _extract(tmp_path, entries)
     textures = load_pack(pack_file)
-    quads = textures.quads("minecraft:oak_fence", {"north": "false"})
+    quads = _resolve(textures, "minecraft:oak_fence", {"north": "false"}).quads
     assert [str(k) for k in quads["texkey"]] == ["block/oak_planks"]
 
 
@@ -1782,15 +1788,17 @@ def test_multipart_when_conditions_merge_per_state(tmp_path):
     pack_file = _make_pack(tmp_path / "pack.zip", entries)
     _extract(tmp_path, entries)
     textures = load_pack(pack_file)
-    both = textures.quads("minecraft:post", {"north": "true", "east": "side"})
+    both = _resolve(
+        textures, "minecraft:post", {"north": "true", "east": "side"}
+    ).quads
     assert sorted({str(k) for k in both["texkey"]}) == [
         "block/arm",
         "block/post",
         "block/up",
     ]
-    none_east = textures.quads(
-        "minecraft:post", {"north": "true", "east": "none"}
-    )
+    none_east = _resolve(
+        textures, "minecraft:post", {"north": "true", "east": "none"}
+    ).quads
     assert sorted({str(k) for k in none_east["texkey"]}) == [
         "block/arm",
         "block/post",
@@ -1831,9 +1839,13 @@ def test_wire_multipart_enumerates_power_for_tint(tmp_path):
     pack_file = _make_pack(tmp_path / "pack.zip", entries)
     _extract(tmp_path, entries)
     textures = load_pack(pack_file)
-    mid = textures.quads("minecraft:redstone_wire", {"power": "8", "north": "none"})
+    mid = _resolve(
+        textures, "minecraft:redstone_wire", {"power": "8", "north": "none"}
+    ).quads
     assert [str(k) for k in mid["texkey"]] == ["block/wire@171,14,14"]
-    zero = textures.quads("minecraft:redstone_wire", {"power": "0", "north": "none"})
+    zero = _resolve(
+        textures, "minecraft:redstone_wire", {"power": "0", "north": "none"}
+    ).quads
     assert [str(k) for k in zero["texkey"]] == ["block/wire@76,0,0"]
 
 
