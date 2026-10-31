@@ -1,5 +1,6 @@
 """Offline isometric rendering of parsed .litematic schematics."""
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,7 @@ def isometric(
     schem: Litematic,
     *,
     textures_path: str | Path | None = None,
+    extra_packs: Sequence[str | Path] = (),
     yaw: int = 0,
     max_size: int = 2048,
     supersample: int = 2,
@@ -46,7 +48,7 @@ def isometric(
             f"got {supersample}"
         )
     bg = _background(background)
-    textures = load_pack(_require_pack(textures_path))
+    textures = load_pack(_require_pack(textures_path), extra_packs)
     scene = _compose(schem, yaw, textures)
     if len(scene.x) == 0:
         raise RenderError("render: no blocks to render")
@@ -65,6 +67,7 @@ def isometric_png(
     schem: Litematic,
     *,
     textures_path: str | Path | None = None,
+    extra_packs: Sequence[str | Path] = (),
     yaw: int = 0,
     max_size: int = 2048,
     supersample: int = 2,
@@ -75,6 +78,7 @@ def isometric_png(
         isometric(
             schem,
             textures_path=textures_path,
+            extra_packs=extra_packs,
             yaw=yaw,
             max_size=max_size,
             supersample=supersample,
@@ -89,10 +93,13 @@ def to_png(image: np.ndarray) -> bytes:
 
 
 def unresolved_colors(
-    schem: Litematic, *, textures_path: str | Path
+    schem: Litematic,
+    *,
+    textures_path: str | Path,
+    extra_packs: Sequence[str | Path] = (),
 ) -> set[str]:
-    """Return block names the pack cannot cover; these render magenta."""
-    textures = load_pack(_require_pack(textures_path))
+    """Return block names the pack stack cannot cover; these render magenta."""
+    textures = load_pack(_require_pack(textures_path), extra_packs)
     return {
         state.name
         for region in schem.regions.values()

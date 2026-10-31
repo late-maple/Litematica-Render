@@ -2,13 +2,13 @@
 
 import io
 import json
-import zipfile
 from typing import Any
 
 import numpy as np
 
 from litematic.render.errors import RenderError
 from litematic.render.pack.resolve import _tint_for
+from litematic.render.pack.stack import PackStack
 from litematic.render.quads import _redstone_tint
 
 _VEC = {
@@ -83,19 +83,18 @@ def _asset_path(ns: str, ref: str, kind: str, suffix: str) -> str | None:
 
 
 def _cached_model(
-    archive: zipfile.ZipFile,
-    names: set[str],
+    stack: PackStack,
     ns: str,
     ref: str,
     cache: dict[str, dict[str, Any] | None],
 ) -> dict[str, Any] | None:
     key = f"{ns}|{ref}"
     if key not in cache:
-        model = _resolve_model(archive, names, ns, ref)
+        model = _resolve_model(stack, ns, ref)
         if model is None:
             cache[key] = None
         elif model["elements"] is None:
-            stub_ref = _stub_texture(names, ns, model["textures"])
+            stub_ref = _stub_texture(stack, ns, model["textures"])
             cache[key] = (
                 None
                 if stub_ref is None
@@ -113,21 +112,21 @@ def _cached_model(
 
 
 def _stub_texture(
-    names: set[str], ns: str, textures: dict[str, Any]
+    stack: PackStack, ns: str, textures: dict[str, Any]
 ) -> str | None:
     """Find the first concrete texture ref an element-less model can load."""
     for value in textures.values():
         if not isinstance(value, str) or value.startswith("#"):
             continue
         path = _asset_path(ns, value, "textures", ".png")
-        if path is not None and path in names:
+        if path is not None and stack.exists(path):
             return value
     return None
 
 
 
 def _resolve_model(
-    archive: zipfile.ZipFile, names: set[str], ns: str, model_ref: str
+    stack: PackStack, ns: str, model_ref: str
 ) -> dict[str, Any] | None:
     """Walk the parent chain and merge textures; nearest elements win."""
     merged_textures: dict[str, str] = {}
@@ -139,9 +138,12 @@ def _resolve_model(
             return None
         seen.add(ref)
         file = _asset_path(ns, ref, "models", ".json")
-        if file is None or file not in names:
+        if file is None or not stack.exists(file):
             return None
-        model = json.loads(archive.read(file))
+        raw = stack.read(file)
+        if raw is None:  # unreachable: the path exists per the check above
+            return None
+        model = json.loads(raw)
         if not isinstance(model, dict):
             return None
         textures = model.get("textures")
@@ -177,8 +179,7 @@ def _rotate(face: str, x: int, y: int) -> str:
 
 
 def _load_texture(
-    archive: zipfile.ZipFile,
-    names: set[str],
+    stack: PackStack,
     ns: str,
     tex_ref: str,
     tex_key: str,
@@ -189,30 +190,31 @@ def _load_texture(
         return cache[tex_key]
     file = _asset_path(ns, tex_ref, "textures", ".png")
     result: np.ndarray | None = None
-    if file is not None and file in names:
-        try:
-            image = _decode_png(archive.read(file), _is_animated(archive, names, file))
-            raw = np.asarray(image, dtype=np.uint8)
-            if budget.take(raw.shape):
-                result = raw
-        except RenderError:
-            raise
-        except Exception:
-            result = None
+    if file is not None:
+        found = stack.read_ranked(file)
+        if found is not None:
+            data, pack_index = found
+            try:
+                image = _decode_png(data, _is_animated(stack, file, pack_index))
+                raw = np.asarray(image, dtype=np.uint8)
+                if budget.take(raw.shape):
+                    result = raw
+            except RenderError:
+                raise
+            except Exception:
+                result = None
     cache[tex_key] = result
     return result
 
 
 
-def _is_animated(
-    archive: zipfile.ZipFile, names: set[str], file: str
-) -> bool:
-    """True when the texture's .mcmeta declares a vanilla animation."""
-    meta = f"{file}.mcmeta"
-    if meta not in names:
+def _is_animated(stack: PackStack, file: str, pack_index: int) -> bool:
+    """True when the texture's .mcmeta above its own pack declares an animation."""
+    data = stack.mcmeta(file, pack_index)
+    if data is None:
         return False
     try:
-        parsed = json.loads(archive.read(meta))
+        parsed = json.loads(data)
     except Exception:
         return False
     return isinstance(parsed, dict) and "animation" in parsed
@@ -237,9 +239,25 @@ def _apply_tint(array: np.ndarray, tint: tuple[int, int, int]) -> np.ndarray:
 
 
 
+def _register_array(
+    raw: np.ndarray,
+    tex_key: str,
+    tint: tuple[int, int, int] | None,
+    tex_arrays: dict[str, np.ndarray],
+) -> str:
+    """Store a raw texture under tex_key, adding a tinted variant if asked."""
+    if tint is None:
+        tex_arrays.setdefault(tex_key, raw)
+        return tex_key
+    array_key = f"{tex_key}@{tint[0]},{tint[1]},{tint[2]}"
+    if array_key not in tex_arrays:
+        tex_arrays[array_key] = _apply_tint(raw, tint)
+    return array_key
+
+
+
 def _first_model_texture(
-    archive: zipfile.ZipFile,
-    names: set[str],
+    stack: PackStack,
     ns: str,
     model_refs: list[str],
     model_cache: dict[str, dict[str, Any] | None],
@@ -248,7 +266,7 @@ def _first_model_texture(
 ) -> np.ndarray | None:
     """First loadable concrete texture among the referenced models."""
     for ref in model_refs:
-        model = _cached_model(archive, names, ns, ref, model_cache)
+        model = _cached_model(stack, ns, ref, model_cache)
         if model is None:
             continue
         for value in model["textures"].values():
@@ -256,8 +274,7 @@ def _first_model_texture(
             if tex_ref is None:
                 continue
             raw = _load_texture(
-                archive,
-                names,
+                stack,
                 ns,
                 tex_ref,
                 _texture_key(tex_ref, ns),
@@ -271,8 +288,7 @@ def _first_model_texture(
 
 
 def _register_builtin_texture(
-    archive: zipfile.ZipFile,
-    names: set[str],
+    stack: PackStack,
     ns: str,
     block_id: str,
     model_refs: list[str],
@@ -287,13 +303,13 @@ def _register_builtin_texture(
     textures/block/<stem>.png; unresolved blocks stay for magenta.
     """
     raw = _first_model_texture(
-        archive, names, ns, model_refs, model_cache, texture_cache, budget
+        stack, ns, model_refs, model_cache, texture_cache, budget
     )
     stem = block_id.partition(":")[2]
     tex_key = _texture_key(f"block/{stem}", ns)
     if raw is None:
         raw = _load_texture(
-            archive, names, ns, f"block/{stem}", tex_key, texture_cache, budget
+            stack, ns, f"block/{stem}", tex_key, texture_cache, budget
         )
     if raw is None:
         return
@@ -311,8 +327,7 @@ _WIRE_DUST_TEXTURES = ("block/redstone_dust_dot", "block/redstone_dust_line0")
 
 
 def _register_wire_dust(
-    archive: zipfile.ZipFile,
-    names: set[str],
+    stack: PackStack,
     ns: str,
     texture_cache: dict[str, np.ndarray | None],
     tex_arrays: dict[str, np.ndarray],
@@ -321,9 +336,7 @@ def _register_wire_dust(
     """Register power-tinted dust textures for the builtin wire family."""
     for ref in _WIRE_DUST_TEXTURES:
         tex_key = _texture_key(ref, ns)
-        raw = _load_texture(
-            archive, names, ns, ref, tex_key, texture_cache, budget
-        )
+        raw = _load_texture(stack, ns, ref, tex_key, texture_cache, budget)
         if raw is None:
             continue
         for power in range(16):

@@ -43,7 +43,7 @@ class Resolver:
         arrays: dict[str, np.ndarray],
         quads_map: dict[str, np.ndarray],
         occl_map: dict[str, bool],
-        pack_mtime: float,
+        pack_mtime: float | tuple[float, ...],
         states: dict[str, dict[str, dict[str, str]]] | None,
         parts_map: dict[str, str],
         mquad_map: dict[str, np.ndarray],

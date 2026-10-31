@@ -1,8 +1,11 @@
-"""Resource pack loading with an mtime-keyed extraction cache."""
+"""Pack stack loading with an mtime-keyed extraction cache."""
 
+import hashlib
 import json
+import re
 import tempfile
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 
@@ -18,51 +21,86 @@ from litematic.render.quads import QUAD_DTYPE
 __all__ = ["load_pack"]
 
 _CACHE_SUFFIX = ".litematic-tex.npz"
+_BAD_CHARS = r'[<>:"/\\|?*]'
+_CACHE_STEM_MAX = 80  # the digest carries uniqueness, stems stay short
 
-# In-process cache keyed (path, mtime); skips re-reading the npz per render.
-_PACK_CACHE: dict[tuple[str, float], Resolver] = {}
+# In-process cache keyed (paths, mtimes); skips re-reading the npz per render.
+_PACK_CACHE: dict[tuple[tuple[str, ...], tuple[float, ...]], Resolver] = {}
 
 
-def load_pack(pack_path: str | Path) -> Resolver:
-    """Load pack textures, extracting to a mtime-keyed cache on miss."""
-    pack_file = Path(pack_path)
-    if not pack_file.is_file():
-        raise RenderError(f"load: not a resource pack: {pack_file}: no such file")
-    try:
-        mtime = pack_file.stat().st_mtime
-    except OSError as exc:
-        raise RenderError(
-            f"load: not a resource pack: {pack_file}: {exc}"
-        ) from exc
-    cache = pack_file.with_name(pack_file.stem + _CACHE_SUFFIX)
-    key = (str(pack_file.resolve()), mtime)
+def load_pack(
+    pack_path: str | Path, extra_packs: Sequence[str | Path] = ()
+) -> Resolver:
+    """Load the pack stack, extracting to an mtime-keyed cache on miss."""
+    packs = [Path(pack_path), *_pack_paths(extra_packs)]
+    mtimes: list[float] = []
+    resolved: list[str] = []
+    for path in packs:
+        if not path.is_file():
+            raise RenderError(f"load: not a resource pack: {path}: no such file")
+        try:
+            mtimes.append(path.stat().st_mtime)
+            resolved.append(str(path.resolve()))
+        except OSError as exc:
+            raise RenderError(
+                f"load: not a resource pack: {path}: {exc}"
+            ) from exc
+    stacked = tuple(mtimes)
+    key = (tuple(resolved), stacked)
     hit = _PACK_CACHE.get(key)
     if hit is not None:
         return hit
-    cached = _read_cache(cache, mtime)
+    if len(packs) == 1:
+        cache = packs[0].with_name(packs[0].stem + _CACHE_SUFFIX)
+    else:
+        cache = packs[0].with_name(_stack_cache_name(packs, resolved))
+    cached = _read_cache(cache, stacked)
     if cached is not None:
         _PACK_CACHE[key] = cached
         return cached
     try:
-        _extract_pack(pack_file, cache, pack_mtime=mtime)
+        _extract_pack(packs, cache, pack_mtime=stacked)
     except _CacheWriteError:
         cache = Path(tempfile.gettempdir()) / cache.name
-        _extract_pack(pack_file, cache, pack_mtime=mtime)
+        _extract_pack(packs, cache, pack_mtime=stacked)
     loaded = _parse_textures(cache)
-    if loaded is None or loaded.pack_mtime != mtime:
+    if loaded is None or loaded.pack_mtime != stacked:
         raise RenderError(f"load: cache unreadable after extraction: {cache}")
     _PACK_CACHE[key] = loaded
     return loaded
 
 
-def _read_cache(cache: Path, mtime: float) -> Resolver | None:
+def _pack_paths(extra_packs: Sequence[str | Path]) -> list[Path]:
+    """Normalize the add-on list; a bare path becomes a one-entry stack."""
+    if isinstance(extra_packs, (str, Path)):
+        return [Path(extra_packs)]
+    try:
+        items = list(extra_packs)
+    except TypeError as exc:
+        raise RenderError(
+            "load: extra_packs must be a sequence of paths"
+        ) from exc
+    for item in items:
+        if not isinstance(item, (str, Path)):
+            raise RenderError("load: extra_packs must be a sequence of paths")
+    return [Path(item) for item in items]
+
+
+def _stack_cache_name(packs: list[Path], resolved: list[str]) -> str:
+    """Cache file name spanning the whole stack, disambiguated by a path hash."""
+    digest = hashlib.sha1("\n".join(resolved).encode("utf-8")).hexdigest()[:8]
+    stem = re.sub(_BAD_CHARS, "_", "+".join(p.stem for p in packs))
+    return f"{stem[:_CACHE_STEM_MAX]}.{digest}{_CACHE_SUFFIX}"
+
+
+def _read_cache(cache: Path, mtimes: tuple[float, ...]) -> Resolver | None:
     if not cache.is_file():
         return None
     parsed = _parse_textures(cache)
     if (
         parsed is None
         or parsed.version != _NPZ_VERSION
-        or parsed.pack_mtime != mtime
+        or parsed.pack_mtime != mtimes
     ):
         return None
     return parsed
@@ -72,7 +110,9 @@ def _parse_textures(path: Path) -> Resolver | None:
     try:
         with np.load(path, allow_pickle=False) as data:
             version = str(data["meta/version"].item())
-            pack_mtime = float(data["meta/pack_mtime"].item())
+            pack_mtime = tuple(
+                float(value) for value in np.atleast_1d(data["meta/pack_mtime"])
+            )
             arrays: dict[str, np.ndarray] = {}
             quads_map: dict[str, np.ndarray] = {}
             occl_map: dict[str, bool] = {}
