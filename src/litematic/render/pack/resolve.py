@@ -50,6 +50,7 @@ class Resolver:
         parts_map: dict[str, str],
         mquad_map: dict[str, np.ndarray],
         item_display: dict[str, dict[str, str]] | None = None,
+        code_hash: str = "",
     ) -> None:
         self.version = version
         self.arrays = arrays
@@ -60,6 +61,7 @@ class Resolver:
         self.parts_map = parts_map
         self.mquad_map = mquad_map
         self.item_display = item_display or {}
+        self.code_hash = code_hash
 
     def resolve(self, state: BlockState) -> Resolution:
         """Run the chain: pack quads, builtin shapes, backfill, magenta."""

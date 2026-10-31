@@ -11,6 +11,7 @@ from PIL import Image
 
 from litematic.parse.model import BlockState
 from litematic.render.errors import RenderError
+from litematic.render.pack import extract as extract_mod
 from litematic.render.pack import load_pack
 from litematic.render.pack import loader as pack_mod
 from litematic.render.pack.resolve import Resolver
@@ -552,3 +553,59 @@ def test_stale_cache_without_items_member_loads_empty(tmp_path, monkeypatch):
         pack_mod._extract_pack = counter.real
     assert counter.calls == 0
     assert textures.item_display == {}
+
+
+def test_cache_without_code_hash_rebuilds(tmp_path, monkeypatch):
+    """A pre-fingerprint cache (the silent-staleness class) must rebuild."""
+    monkeypatch.setattr(pack_mod, "_PACK_CACHE", {})
+    pack_file = _mini_pack(tmp_path / "pack.zip")
+    load_pack(pack_file)
+    cache = tmp_path / "pack.litematic-tex.npz"
+    data = dict(np.load(cache, allow_pickle=False))
+    del data["meta/code_hash"]  # simulate a cache from older extraction code
+    np.savez(cache, **data)
+    pack_mod._PACK_CACHE.clear()
+    counter = _Counter()
+    pack_mod._extract_pack = counter
+    try:
+        load_pack(pack_file)
+    finally:
+        pack_mod._extract_pack = counter.real
+    assert counter.calls == 1
+    with np.load(cache, allow_pickle=False) as data:
+        assert str(data["meta/code_hash"].item()) == extract_mod._code_fingerprint()
+
+
+def test_code_hash_mismatch_forces_reextract(tmp_path, monkeypatch):
+    monkeypatch.setattr(pack_mod, "_PACK_CACHE", {})
+    pack_file = _mini_pack(tmp_path / "pack.zip")
+    load_pack(pack_file)
+    cache = tmp_path / "pack.litematic-tex.npz"
+    data = dict(np.load(cache, allow_pickle=False))
+    data["meta/code_hash"] = np.array("stale")
+    np.savez(cache, **data)
+    pack_mod._PACK_CACHE.clear()
+    counter = _Counter()
+    pack_mod._extract_pack = counter
+    try:
+        load_pack(pack_file)
+    finally:
+        pack_mod._extract_pack = counter.real
+    assert counter.calls == 1
+    with np.load(cache, allow_pickle=False) as data:
+        assert str(data["meta/code_hash"].item()) == extract_mod._code_fingerprint()
+
+
+def test_matching_code_hash_reuses_disk_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(pack_mod, "_PACK_CACHE", {})
+    pack_file = _mini_pack(tmp_path / "pack.zip")
+    load_pack(pack_file)
+    pack_mod._PACK_CACHE.clear()
+    counter = _Counter()
+    pack_mod._extract_pack = counter
+    try:
+        textures = load_pack(pack_file)
+    finally:
+        pack_mod._extract_pack = counter.real
+    assert counter.calls == 0
+    assert _resolve(textures, "minecraft:stone").miss is None

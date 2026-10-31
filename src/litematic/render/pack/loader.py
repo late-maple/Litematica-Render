@@ -1,4 +1,4 @@
-"""Pack stack loading with an mtime-keyed extraction cache."""
+"""Pack stack loading with an mtime- and code-keyed extraction cache."""
 
 import hashlib
 import json
@@ -13,6 +13,7 @@ from litematic.render.errors import RenderError
 from litematic.render.pack.extract import (
     _NPZ_VERSION,
     _CacheWriteError,
+    _code_fingerprint,
     _extract_pack,
 )
 from litematic.render.pack.resolve import Resolver, _state_index
@@ -31,7 +32,7 @@ _PACK_CACHE: dict[tuple[tuple[str, ...], tuple[float, ...]], Resolver] = {}
 def load_pack(
     pack_path: str | Path, extra_packs: Sequence[str | Path] = ()
 ) -> Resolver:
-    """Load the pack stack, extracting to an mtime-keyed cache on miss."""
+    """Load the pack stack, extracting to an mtime- and code-keyed cache on miss."""
     packs = [Path(pack_path), *_pack_paths(extra_packs)]
     mtimes: list[float] = []
     resolved: list[str] = []
@@ -64,7 +65,11 @@ def load_pack(
         cache = Path(tempfile.gettempdir()) / cache.name
         _extract_pack(packs, cache, pack_mtime=stacked)
     loaded = _parse_textures(cache)
-    if loaded is None or loaded.pack_mtime != stacked:
+    if (
+        loaded is None
+        or loaded.pack_mtime != stacked
+        or loaded.code_hash != _code_fingerprint()
+    ):
         raise RenderError(f"load: cache unreadable after extraction: {cache}")
     _PACK_CACHE[key] = loaded
     return loaded
@@ -101,6 +106,7 @@ def _read_cache(cache: Path, mtimes: tuple[float, ...]) -> Resolver | None:
         parsed is None
         or parsed.version != _NPZ_VERSION
         or parsed.pack_mtime != mtimes
+        or parsed.code_hash != _code_fingerprint()
     ):
         return None
     return parsed
@@ -119,6 +125,11 @@ def _parse_textures(path: Path) -> Resolver | None:
             parts_map: dict[str, str] = {}
             mquad_map: dict[str, np.ndarray] = {}
             item_display: dict[str, dict[str, str]] = {}
+            code_hash = (
+                str(data["meta/code_hash"].item())
+                if "meta/code_hash" in data.files
+                else ""
+            )
             if "items" in data.files:
                 try:
                     parsed = json.loads(str(data["items"].item()))
@@ -178,6 +189,7 @@ def _parse_textures(path: Path) -> Resolver | None:
             parts_map=parts_map,
             mquad_map=mquad_map,
             item_display=item_display,
+            code_hash=code_hash,
         )
     except Exception:
         return None

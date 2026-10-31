@@ -1,5 +1,6 @@
 """Pack extraction orchestration: blockstates → quads → npz."""
 
+import hashlib
 import io
 import json
 import zipfile
@@ -46,6 +47,29 @@ _FIXED_DATE = (1980, 1, 1, 0, 0, 0)
 
 
 _NPZ_VERSION = "pack-quads.1"
+
+_FINGERPRINT: list[str] = []
+
+
+
+def _code_fingerprint() -> str:
+    """Digest of the extraction-side sources; any change forces a rebuild."""
+    if not _FINGERPRINT:
+        root = Path(__file__).parent
+        paths = sorted(root.glob("*.py"))
+        paths += sorted((root.parent / "shapes").glob("*.py"))
+        paths.append(root.parent / "quads.py")
+        digest = hashlib.sha256()
+        try:
+            for path in paths:
+                digest.update(str(path).encode("utf-8"))
+                digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
+        except OSError as exc:
+            raise RenderError(
+                f"extract: cannot fingerprint extraction code: {exc}"
+            ) from exc
+        _FINGERPRINT.append(digest.hexdigest()[:16])
+    return _FINGERPRINT[0]
 
 
 
@@ -392,6 +416,7 @@ def _write_npz(
     entries: dict[str, np.ndarray] = {
         "meta/version": np.array(_NPZ_VERSION),
         "meta/pack_mtime": np.array(pack_mtime),
+        "meta/code_hash": np.array(_code_fingerprint()),
         "items": np.array(json.dumps(items_map)),
     }
     for array_key, array in tex_arrays.items():
