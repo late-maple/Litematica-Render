@@ -1,11 +1,12 @@
 """Offline isometric rendering of parsed .litematic schematics."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
 
 from litematic.parse.model import Litematic
+from litematic.render.entity import item_content_texkey
 from litematic.render.errors import RenderError
 from litematic.render.pack import load_pack
 from litematic.render.png import encode_png
@@ -29,6 +30,7 @@ def isometric(
     *,
     textures_path: str | Path | None = None,
     extra_packs: Sequence[str | Path] = (),
+    entities: bool = True,
     yaw: int = 0,
     max_size: int = 2048,
     supersample: int = 2,
@@ -47,9 +49,11 @@ def isometric(
             f"render: supersample must be {_SS_BOUNDS[0]}-{_SS_BOUNDS[1]}, "
             f"got {supersample}"
         )
+    if not isinstance(entities, bool):
+        raise RenderError(f"render: entities must be a boolean, got {entities!r}")
     bg = _background(background)
     textures = load_pack(_require_pack(textures_path), extra_packs)
-    scene = _compose(schem, yaw, textures)
+    scene = _compose(schem, yaw, textures, entities)
     if len(scene.x) == 0:
         raise RenderError("render: no blocks to render")
     t, _ = _choose_scale(scene.span_w, scene.span_h, max_size, supersample)
@@ -68,6 +72,7 @@ def isometric_png(
     *,
     textures_path: str | Path | None = None,
     extra_packs: Sequence[str | Path] = (),
+    entities: bool = True,
     yaw: int = 0,
     max_size: int = 2048,
     supersample: int = 2,
@@ -79,6 +84,7 @@ def isometric_png(
             schem,
             textures_path=textures_path,
             extra_packs=extra_packs,
+            entities=entities,
             yaw=yaw,
             max_size=max_size,
             supersample=supersample,
@@ -97,16 +103,25 @@ def unresolved_colors(
     *,
     textures_path: str | Path,
     extra_packs: Sequence[str | Path] = (),
+    entities: bool = True,
 ) -> set[str]:
-    """Return block names the pack stack cannot cover; these render magenta."""
+    """Return names the pack stack cannot cover. Palette blocks and frame
+    content render magenta; dropped items and armor stands skip silently
+    but are still reported. With entities=False only palette names are
+    checked."""
+    if not isinstance(entities, bool):
+        raise RenderError(f"render: entities must be a boolean, got {entities!r}")
     textures = load_pack(_require_pack(textures_path), extra_packs)
-    return {
+    missed = {
         state.name
         for region in schem.regions.values()
         for state in region.palette
         if state.name not in _AIR_NAMES
         and textures.resolve(state).miss is not None
     }
+    if entities:
+        missed |= _unresolved_entities(schem, textures)
+    return missed
 
 
 def _background(
@@ -132,3 +147,19 @@ def _require_pack(textures_path: str | Path | None) -> str | Path:
             "render: a resource pack zip is required (pass textures_path)"
         )
     return textures_path
+
+
+def _unresolved_entities(schem: Litematic, textures) -> set[str]:
+    """Item ids the entity builders cannot draw; skipped or magenta."""
+    missed: set[str] = set()
+    for region in schem.regions.values():
+        for ent in region.entities:
+            stem = ent.id.rpartition(":")[2]
+            if stem not in ("item", "item_frame", "glow_item_frame"):
+                continue
+            item = ent.data.get("Item")
+            item_id = item.get("id") if isinstance(item, Mapping) else None
+            if isinstance(item_id, str) and item_id:
+                if item_content_texkey(item_id, textures) is None:
+                    missed.add(item_id)
+    return missed

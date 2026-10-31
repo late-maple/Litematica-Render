@@ -45,7 +45,7 @@ def _two_color_pack(path):
     return path
 
 
-def _schem(blocks):
+def _schem(blocks, entities=None):
     names = [n if ":" in n else f"minecraft:{n}" for n, *_ in blocks]
     palette = [("minecraft:air", {})] + [(name, {}) for name in names]
     sx = max(b[1] for b in blocks) + 1
@@ -63,6 +63,7 @@ def _schem(blocks):
                     "size": (sx, sy, sz),
                     "palette": palette,
                     "indices_yzx": idx,
+                    "entities": entities or [],
                 }
             ]
         )
@@ -179,3 +180,35 @@ def test_to_png_signature_and_rejection():
     assert to_png(img).startswith(b"\x89PNG")
     with pytest.raises(RenderError):
         to_png(np.zeros((2, 2, 3), np.uint8))
+
+
+def test_entities_non_bool_rejected(tmp_path):
+    pack = _two_color_pack(tmp_path / "pack.zip")
+    schem = _schem(_TWO)
+    with pytest.raises(RenderError, match="entities must be a boolean"):
+        isometric_png(schem, textures_path=pack, entities="yes")
+
+
+def test_unresolved_colors_counts_entity_items(tmp_path):
+    pack = _two_color_pack(tmp_path / "pack.zip")
+    schem = _schem(
+        [("stone", 0, 0, 0), ("create:x", 1, 0, 0)],
+        entities=[{"id": "minecraft:item", "Pos": [0.5, 0.0, 0.5],
+                   "Item": {"id": "minecraft:ghost_item", "Count": 1}}],
+    )
+    assert unresolved_colors(schem, textures_path=pack) == {
+        "create:x",
+        "minecraft:ghost_item",
+    }
+
+
+def test_unresolved_colors_entities_false_skips_entity_items(tmp_path):
+    pack = _two_color_pack(tmp_path / "pack.zip")
+    schem = _schem(
+        [("stone", 0, 0, 0), ("create:x", 1, 0, 0)],
+        entities=[{"id": "minecraft:item", "Pos": [0.5, 0.0, 0.5],
+                   "Item": {"id": "minecraft:ghost_item", "Count": 1}}],
+    )
+    assert unresolved_colors(
+        schem, textures_path=pack, entities=False
+    ) == {"create:x"}

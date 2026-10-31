@@ -118,6 +118,14 @@ def _parse_textures(path: Path) -> Resolver | None:
             occl_map: dict[str, bool] = {}
             parts_map: dict[str, str] = {}
             mquad_map: dict[str, np.ndarray] = {}
+            item_display: dict[str, dict[str, str]] = {}
+            if "items" in data.files:
+                try:
+                    parsed = json.loads(str(data["items"].item()))
+                    if isinstance(parsed, dict):
+                        item_display = parsed
+                except Exception:
+                    item_display = {}
             for key in data.files:
                 if key.startswith("tex/"):
                     array = data[key]
@@ -169,6 +177,7 @@ def _parse_textures(path: Path) -> Resolver | None:
             states=_state_index(quads_map, occl_map),
             parts_map=parts_map,
             mquad_map=mquad_map,
+            item_display=item_display,
         )
     except Exception:
         return None

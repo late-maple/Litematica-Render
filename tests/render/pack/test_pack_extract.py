@@ -2009,3 +2009,104 @@ def test_pack_quads4_cache_rebuilds(tmp_path):
     np.savez(cache, **data)
     textures = load_pack(pack_file)
     assert textures.version == "pack-quads.1"
+
+
+def test_items_map_block_and_flat_and_armorstand(tmp_path):
+    """1.21.9 dual path: items/*.json -> block models; models/item -> generated."""
+    entries = {
+        **_stone_entries(),
+        "assets/minecraft/items/stone.json": json.dumps(
+            {"model": {"type": "minecraft:model", "model": "minecraft:block/stone"}}
+        ),
+        "assets/minecraft/items/wheat_seeds.json": json.dumps(
+            {
+                "model": {
+                    "type": "minecraft:model",
+                    "model": "minecraft:item/wheat_seeds",
+                }
+            }
+        ),
+        "assets/minecraft/models/item/wheat_seeds.json": json.dumps(
+            {
+                "parent": "minecraft:item/generated",
+                "textures": {"layer0": "minecraft:item/wheat_seeds"},
+            }
+        ),
+        "assets/minecraft/models/item/generated.json": json.dumps(
+            {"parent": "builtin/generated"}
+        ),
+        "assets/minecraft/models/item/item_frame.json": json.dumps(
+            {
+                "parent": "minecraft:item/generated",
+                "textures": {"layer0": "minecraft:item/item_frame"},
+            }
+        ),
+        "assets/minecraft/textures/item/wheat_seeds.png": _solid_png(
+            (160, 120, 40, 255)
+        ),
+        "assets/minecraft/textures/item/item_frame.png": _solid_png(
+            (90, 60, 30, 255)
+        ),
+        "assets/minecraft/textures/entity/armorstand/armorstand.png": _solid_png(
+            (120, 100, 90, 255)
+        ),
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    items = json.loads(str(data["items"].item()))
+    assert items["minecraft:stone"] == {"block": "minecraft:stone"}
+    assert items["minecraft:wheat_seeds"] == {"flat": "item/wheat_seeds"}
+    assert items["minecraft:item_frame"] == {"flat": "item/item_frame"}
+    assert _tex(data, "item/wheat_seeds").shape == (16, 16, 4)
+    assert _tex(data, "item/item_frame").shape == (16, 16, 4)
+    assert _tex(data, "entity/armorstand/armorstand").shape == (16, 16, 4)
+
+
+def test_items_map_flat_tint_records_registered_key(tmp_path):
+    """A tinted flat item must record the tinted array key, not the bare one."""
+    entries = {
+        **_stone_entries(),
+        "assets/minecraft/items/tall_grass.json": json.dumps(
+            {
+                "model": {
+                    "type": "minecraft:model",
+                    "model": "minecraft:item/tall_grass",
+                }
+            }
+        ),
+        "assets/minecraft/models/item/tall_grass.json": json.dumps(
+            {
+                "parent": "minecraft:item/generated",
+                "textures": {"layer0": "minecraft:item/tall_grass"},
+            }
+        ),
+        "assets/minecraft/models/item/generated.json": json.dumps(
+            {"parent": "builtin/generated"}
+        ),
+        "assets/minecraft/textures/item/tall_grass.png": _solid_png(
+            (90, 140, 60, 255)
+        ),
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    items = json.loads(str(data["items"].item()))
+    flat = items["minecraft:tall_grass"]["flat"]
+    assert flat.startswith("item/tall_grass@")
+    assert _tex(data, flat).shape == (16, 16, 4)
+
+
+def test_items_map_skips_unresolvable_and_non_model_types(tmp_path):
+    entries = {
+        **_stone_entries(),
+        "assets/minecraft/items/missing.json": json.dumps(
+            {"model": {"type": "minecraft:model", "model": "minecraft:block/ghost"}}
+        ),
+        "assets/minecraft/items/empty.json": json.dumps({"model": None}),
+        "assets/minecraft/items/range.json": json.dumps(
+            {"model": {"type": "minecraft:range_dispatch"}}
+        ),
+        "assets/minecraft/models/item/generated.json": json.dumps(
+            {"parent": "builtin/generated"}
+        ),
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    items = json.loads(str(data["items"].item()))
+    assert items == {}

@@ -214,8 +214,8 @@ def test_corrupt_cache_member_auto_rebuilds(tmp_path, monkeypatch):
     load_pack(pack_file)
     cache = tmp_path / "pack.litematic-tex.npz"
     raw = bytearray(cache.read_bytes())
-    member = raw.index(b"tex/block/stone")
-    raw[member + 120] ^= 0xFF  # flip a byte inside the compressed payload
+    central = raw.rindex(b"tex/block/stone") - 46
+    raw[central + 18] ^= 0xFF  # corrupt the central directory's stored CRC-32
     cache.write_bytes(bytes(raw))
     pack_mod._PACK_CACHE.clear()
     counter = _Counter()
@@ -533,3 +533,22 @@ def test_pack_cache_invalidates_on_mtime(tmp_path, monkeypatch):
     assert res.miss is None
     key = str(res.quads["texkey"][0])
     assert (changed.arrays[key] == (10, 200, 10, 255)).all()
+
+
+def test_stale_cache_without_items_member_loads_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(pack_mod, "_PACK_CACHE", {})
+    pack_file = _mini_pack(tmp_path / "pack.zip")
+    load_pack(pack_file)
+    cache = tmp_path / "pack.litematic-tex.npz"
+    data = dict(np.load(cache, allow_pickle=False))
+    del data["items"]  # simulate a pre-items cache
+    np.savez(cache, **data)
+    pack_mod._PACK_CACHE.clear()
+    counter = _Counter()
+    pack_mod._extract_pack = counter
+    try:
+        textures = load_pack(pack_file)
+    finally:
+        pack_mod._extract_pack = counter.real
+    assert counter.calls == 0
+    assert textures.item_display == {}

@@ -4,6 +4,7 @@ import json
 import zipfile
 
 import numpy as np
+import pytest
 from helpers.litematica_packer import build_litematic_bytes
 
 from litematic import loads
@@ -1024,3 +1025,133 @@ def test_degenerate_regions():
     assert len(_compose(_single_block("minecraft:air"), 0, textures).x) == 0
     empty = _box_schematic((2, 1, 2), "minecraft:air")
     assert len(_compose(empty, 0, textures).x) == 0
+
+
+# Entity mounting: entities compile to float-offset quad rows appended to
+# the block pass, never occluding, skipped when outside the block volume.
+
+
+def _entity_textures():
+    return Resolver(
+        version="pack-quads",
+        arrays={
+            "block/stone": np.full((16, 16, 4), _STONE, np.uint8),
+            "item/wheat_seeds": np.full((16, 16, 4), (160, 120, 40, 255), np.uint8),
+            "block/item_frame": np.full((16, 16, 4), (90, 60, 30, 255), np.uint8),
+            "block/birch_planks": np.full((16, 16, 4), (196, 179, 140, 255), np.uint8),
+            "entity/armorstand/armorstand": np.full(
+                (64, 64, 4), (120, 100, 90, 255), np.uint8
+            ),
+        },
+        quads_map={"minecraft:stone[]": unit_cube_quads("block/stone")},
+        occl_map={"minecraft:stone[]": True},
+        pack_mtime=0.0,
+        states=None,
+        parts_map={},
+        mquad_map={"__frame_pad": _frame_pad_quads()},
+        item_display={"minecraft:wheat_seeds": {"flat": "item/wheat_seeds"}},
+    )
+
+
+def _frame_pad_quads():
+    pad = np.zeros(2, QUAD_DTYPE)
+    pad["texkey"][:] = "block/item_frame"
+    pad["vtx"][:, :, 2] = 15.5
+    return pad
+
+
+def _entity_schematic(entities, size=(2, 2, 2)):
+    palette = [("minecraft:air", {}), ("minecraft:stone", {})]
+    n = size[0] * size[1] * size[2]
+    indices = np.ones(n, dtype=np.uint16)
+    return loads(
+        build_litematic_bytes(
+            [
+                {
+                    "name": "Main",
+                    "position": (0, 0, 0),
+                    "size": size,
+                    "palette": palette,
+                    "indices_yzx": indices,
+                    "entities": entities,
+                }
+            ]
+        )
+    )
+
+
+def _item_nbt(x, y, z, item="minecraft:wheat_seeds"):
+    return {
+        "id": "minecraft:item",
+        "Pos": [float(x), float(y), float(z)],
+        "Item": {"id": item, "Count": 1},
+    }
+
+
+def _entity_rows_of(scene, key_fragment):
+    ids = [i for i, k in enumerate(scene.texkeys) if key_fragment in k]
+    if not ids:
+        return np.zeros(len(scene.texkey_ids), bool)
+    return np.isin(scene.texkey_ids, ids)
+
+
+def test_item_entity_mounts_with_fractional_offsets():
+    schem = _entity_schematic(
+        [_item_nbt(0.5, 0.25, 0.5)],
+    )
+    scene = _compose(schem, 0, _entity_textures())
+    rows = _entity_rows_of(scene, "item/wheat_seeds")
+    assert rows.any()
+    vtx = scene.quad_vtx[rows]
+    x = vtx[..., 0]
+    # x fraction 0.5 = cell-centered: builders already sit at the center
+    assert x.min() == pytest.approx(4.0)
+    y = vtx[..., 1]
+    assert y.min() == pytest.approx(2.6 + 4.0)  # y fraction 0.25 * 16
+
+
+def test_entities_outside_region_volume_skipped():
+    schem = _entity_schematic([_item_nbt(5.0, 0.0, 0.0)])
+    scene = _compose(schem, 0, _entity_textures())
+    assert not _entity_rows_of(scene, "item/wheat_seeds").any()
+
+
+def test_entities_false_mounts_nothing():
+    schem = _entity_schematic([_item_nbt(0.5, 0.0, 0.5)])
+    full = _compose(schem, 0, _entity_textures())
+    bare = _compose(schem, 0, _entity_textures(), entities=False)
+    assert _entity_rows_of(full, "item/wheat_seeds").any()
+    assert not _entity_rows_of(bare, "item/wheat_seeds").any()
+
+
+def test_frame_and_stand_mount_with_real_texkeys():
+    entities = [
+        {
+            "id": "minecraft:item_frame",
+            "Pos": [0.5, 1.0, 0.5],
+            "Facing": 3,
+            "Item": {"id": "minecraft:wheat_seeds", "Count": 1},
+        },
+        {"id": "minecraft:armor_stand", "Pos": [1.5, 0.0, 1.5]},
+    ]
+    scene = _compose(_entity_schematic(entities), 0, _entity_textures())
+    assert _entity_rows_of(scene, "block/item_frame").any()
+    assert _entity_rows_of(scene, "entity/armorstand").any()
+
+
+def test_unknown_entity_types_skip_silently():
+    entities = [{"id": "minecraft:pig", "Pos": [0.5, 0.0, 0.5]}]
+    scene = _compose(_entity_schematic(entities), 0, _entity_textures())
+    assert len(scene.x) == sum(
+        1 for _ in scene.x
+    ) - _entity_rows_of(scene, "item").sum()
+
+
+def test_entity_anchors_follow_yaw_rotation():
+    schem = _entity_schematic([_item_nbt(0.5, 0.0, 0.5)])
+    scene = _compose(schem, 1, _entity_textures())
+    rows = _entity_rows_of(scene, "item/wheat_seeds")
+    assert rows.any()
+    anchor_x = scene.x[rows][0]
+    anchor_z = scene.z[rows][0]
+    assert (anchor_x, anchor_z) == (0, 1)  # yaw 1: (x, z) -> (z, W-1-x)

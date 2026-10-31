@@ -110,7 +110,10 @@ def _project(scene: _Scene, t: int) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _depth(scene: _Scene) -> np.ndarray:
-    """Painter depth: the block sum plus the centroid in block fractions."""
+    """Painter depth: the composed override array when present, else the
+    block sum plus the centroid in block fractions."""
+    if scene.depth is not None:
+        return scene.depth
     centroid = scene.quad_vtx.astype(np.float64).mean(axis=1) / 16.0
     return (
         scene.x.astype(np.float64)

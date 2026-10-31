@@ -22,6 +22,8 @@ MISS_NO_GEOMETRY = "no-geometry"
 MISS_NO_TEXTURE = "no-texture"
 
 _MAGENTA_TEXKEY = "__magenta__"
+# Synthetic key the extractor writes the compiled vanilla frame pad under.
+FRAME_PAD_KEY = "__frame_pad"
 _MAGENTA_ARRAY = np.full((16, 16, 4), (255, 0, 255, 255), np.uint8)
 _MAGENTA_ARRAY.flags.writeable = False  # painter must never mutate in place
 
@@ -47,6 +49,7 @@ class Resolver:
         states: dict[str, dict[str, dict[str, str]]] | None,
         parts_map: dict[str, str],
         mquad_map: dict[str, np.ndarray],
+        item_display: dict[str, dict[str, str]] | None = None,
     ) -> None:
         self.version = version
         self.arrays = arrays
@@ -56,6 +59,7 @@ class Resolver:
         self.states = states
         self.parts_map = parts_map
         self.mquad_map = mquad_map
+        self.item_display = item_display or {}
 
     def resolve(self, state: BlockState) -> Resolution:
         """Run the chain: pack quads, builtin shapes, backfill, magenta."""
@@ -90,6 +94,10 @@ class Resolver:
                     f"resolve: quad texkey missing from pack arrays: {key}"
                 )
         return out
+
+    def pack_quads(self, name: str) -> np.ndarray | None:
+        """The stateless pack quads for a block, or None when absent."""
+        return self._pack_quads(name, {})
 
     def _pack_quads(
         self, name: str, properties: Mapping[str, str]

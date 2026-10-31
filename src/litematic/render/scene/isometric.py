@@ -1,10 +1,19 @@
 """Scene composition: quad expansion, yaw remap, camera filtering, AO."""
 
+import math
+from collections.abc import Mapping
 from typing import NamedTuple
 
 import numpy as np
 
 from litematic.parse.model import Litematic
+from litematic.render.entity import (
+    _FACING_STEP,
+    armor_stand_quads,
+    entity_props,
+    item_entity_quads,
+    item_frame_quads,
+)
 from litematic.render.errors import RenderError
 from litematic.render.pack.resolve import Resolver
 from litematic.render.quads import (
@@ -59,6 +68,7 @@ class _Scene(NamedTuple):
     texkeys: dict[str, np.ndarray]  # unique texkey -> (16, 16, 4) array
     span_w: int  # canvas width in pixels = 2t * span_w at scale t
     span_h: int  # canvas height in pixels = t * span_h at scale t
+    depth: np.ndarray | None = None  # (Q,) f64 painter depth; None = centroid
 
 
 def _yaw_rot(
@@ -146,17 +156,21 @@ def _new_arena(capacity: int) -> _Arena:
     )
 
 
-def _compose(schem: Litematic, yaw: int, textures: Resolver) -> _Scene:
-    """Collect visible blocks from all regions into a quad scene."""
+def _compose(
+    schem: Litematic, yaw: int, textures: Resolver, entities: bool = True
+) -> _Scene:
+    """Collect visible blocks and entities from all regions into a scene."""
     try:
-        return _compose_inner(schem, yaw, textures)
+        return _compose_inner(schem, yaw, textures, entities)
     except RenderError:
         raise
     except Exception as exc:
         raise RenderError(f"compose: scene composition failed: {exc}") from exc
 
 
-def _compose_inner(schem: Litematic, yaw: int, textures: Resolver) -> _Scene:
+def _compose_inner(
+    schem: Litematic, yaw: int, textures: Resolver, entities: bool
+) -> _Scene:
     """Expand every region's visible cells into yawed, filtered quads.
 
     Pass A stashes per-slab visible cells and counts the exact camera-facing
@@ -182,9 +196,14 @@ def _compose_inner(schem: Litematic, yaw: int, textures: Resolver) -> _Scene:
             for (*_, picked) in stash
         )
         plan.append((region, luts, stash))
-    if capacity == 0:
+    entity_rows = (
+        _entity_rows(schem, textures, key_ids, key_arrays) if entities else None
+    )
+    entity_count = 0 if entity_rows is None else len(entity_rows[0])
+    entity_override = None if entity_rows is None else entity_rows[8]
+    if capacity + entity_count == 0:
         return _empty_scene()
-    arena = _new_arena(capacity)
+    arena = _new_arena(capacity + entity_count)
     written = 0
     for region, luts, stash in plan:
         px, py, pz = region.position.x, region.position.y, region.position.z
@@ -194,6 +213,10 @@ def _compose_inner(schem: Litematic, yaw: int, textures: Resolver) -> _Scene:
                 luts, region, tier_map, yaw, (px, py, pz),
             )
         stash.clear()
+    if entity_rows is not None:
+        written += _write_entity_rows(
+            arena, written, entity_rows[:8], tier_map, yaw
+        )
     x = arena.x[:written]
     y = arena.y[:written]
     z = arena.z[:written]
@@ -204,6 +227,7 @@ def _compose_inner(schem: Litematic, yaw: int, textures: Resolver) -> _Scene:
     span_w = int(rx.max()) + int(rz.max()) + 2
     span_h = int(rx.max()) + int(rz.max()) + 2 * int(y.max()) + 4
     # Copy so the capacity-sized arena is not pinned by views.
+    depth = _compose_depth(arena, written, entity_override)
     return _Scene(
         rx.astype(np.int32),
         y.astype(np.int32),
@@ -217,7 +241,179 @@ def _compose_inner(schem: Litematic, yaw: int, textures: Resolver) -> _Scene:
         dict(key_arrays),
         span_w,
         span_h,
+        depth,
     )
+
+
+def _entity_rows(
+    schem: Litematic,
+    textures: Resolver,
+    key_ids: dict[str, int],
+    key_arrays: dict[str, np.ndarray],
+) -> tuple | None:
+    """Compile supported entities into scene-column row groups.
+
+    Entity rows never occlude and carry no AO; anchors outside their
+    region's block volume are skipped.
+    """
+    xs: list[np.ndarray] = []
+    ys: list[np.ndarray] = []
+    zs: list[np.ndarray] = []
+    vtxs: list[np.ndarray] = []
+    uvs: list[np.ndarray] = []
+    shades: list[np.ndarray] = []
+    dbls: list[np.ndarray] = []
+    texs: list[np.ndarray] = []
+    overrides: list[float] = []
+    for name in sorted(schem.regions):
+        region = schem.regions[name]
+        for ent in region.entities:
+            stem = ent.id.rpartition(":")[2]
+            cx, cy, cz = (
+                math.floor(ent.pos[0]),
+                math.floor(ent.pos[1]),
+                math.floor(ent.pos[2]),
+            )
+            if not (
+                0 <= cx < region.size.x
+                and 0 <= cy < region.size.y
+                and 0 <= cz < region.size.z
+            ):
+                continue
+            props = entity_props(ent.data)
+            quads = _entity_quads_for(ent, textures, props)
+            if quads is None or len(quads) == 0:
+                continue
+            ids = _texkey_ids(quads, textures, key_ids, key_arrays)
+            # Builders center x/z on the cell and anchor y at its floor, so
+            # y takes the full fraction while x/z take the off-center part.
+            # Frames bake their full wall placement via the facing turns
+            # (pos is the cell center on every axis) and stay unshifted —
+            # but their depth anchor moves to the cell they face, so the
+            # pad paints after the wall block it hangs on (the painter's
+            # centroid depth would otherwise let that face cover it).
+            flat = np.nan
+            if stem == "item_frame" or stem == "glow_item_frame":
+                facing = props.get("facing")
+                step = (
+                    _FACING_STEP[facing]
+                    if isinstance(facing, str) and facing in _FACING_STEP
+                    else (0, 0, 0)
+                )
+                # Depth anchor in the faced cell; the vtx compensates so the
+                # projection stays put while the depth gains the full step.
+                cx, cy, cz = cx + step[0], cy + step[1], cz + step[2]
+                fx, fy, fz = (
+                    -step[0] * 16.0,
+                    -step[1] * 16.0,
+                    -step[2] * 16.0,
+                )
+                flat = float(cx + cy + cz)
+            else:
+                fx = (ent.pos[0] - cx - 0.5) * 16.0
+                fy = (ent.pos[1] - cy) * 16.0
+                fz = (ent.pos[2] - cz - 0.5) * 16.0
+            vtx = quads["vtx"].copy()
+            vtx[..., 0] += fx
+            vtx[..., 1] += fy
+            vtx[..., 2] += fz
+            count = len(quads)
+            xs.append(np.full(count, region.position.x + cx, np.int32))
+            ys.append(np.full(count, region.position.y + cy, np.int32))
+            zs.append(np.full(count, region.position.z + cz, np.int32))
+            vtxs.append(vtx)
+            uvs.append(quads["uv"])
+            shades.append(quads["shade"])
+            dbls.append(quads["dbl"])
+            texs.append(ids)
+            overrides.extend([float(flat)] * count)
+    if not xs:
+        return None
+    return (
+        np.concatenate(xs),
+        np.concatenate(ys),
+        np.concatenate(zs),
+        np.concatenate(vtxs),
+        np.concatenate(uvs),
+        np.concatenate(shades),
+        np.concatenate(dbls),
+        np.concatenate(texs),
+        np.array(overrides, np.float64),
+    )
+
+
+def _write_entity_rows(
+    arena: _Arena,
+    offset: int,
+    rows: tuple,
+    tier_map: np.ndarray,
+    yaw: int,
+) -> int:
+    """Append entity rows after the block pass; every tier stays renderable."""
+    ex, ey, ez, evtx, euv, eshade, edbl, etex = rows
+    count = len(ex)
+    end = offset + count
+    arena.x[offset:end] = ex
+    arena.y[offset:end] = ey
+    arena.z[offset:end] = ez
+    arena.vtx[offset:end] = _rotate_vertices(evtx, yaw)
+    arena.uv[offset:end] = euv
+    arena.ao[offset:end] = 1.0
+    arena.shade[offset:end] = tier_map[eshade]
+    arena.dbl[offset:end] = edbl
+    arena.texkey[offset:end] = etex
+    return count
+
+
+def _entity_quads_for(
+    ent, textures: Resolver, props: dict[str, object]
+) -> np.ndarray | None:
+    """Dispatch one entity to its builder by id stem."""
+    stem = ent.id.rpartition(":")[2]
+    if stem == "item":
+        item_id = _entity_item_id(ent.data)
+        if item_id is None:
+            return None
+        return item_entity_quads(item_id, textures)
+    if stem in ("item_frame", "glow_item_frame"):
+        return item_frame_quads(props, _entity_item_id(ent.data), textures)
+    if stem == "armor_stand":
+        return armor_stand_quads(props, textures)
+    return None
+
+
+def _entity_item_id(data: Mapping) -> str | None:
+    item = data.get("Item")
+    if isinstance(item, Mapping):
+        item_id = item.get("id")
+        if isinstance(item_id, str) and item_id:
+            return item_id
+    return None
+
+
+def _compose_depth(
+    arena: _Arena,
+    written: int,
+    override: np.ndarray | None,
+) -> np.ndarray:
+    """Painter depth per quad: raw anchor sums plus face centroids. Entity
+    rows carrying an override (wall-mounted frames) take their flat faced-cell
+    sum instead — the centroid scatters a wall pad's thin faces across the
+    covering block's depth range and lets that face paint over them."""
+    fx = arena.vtx[:written, :, 0].astype(np.float64) / 16.0
+    fy = arena.vtx[:written, :, 1].astype(np.float64) / 16.0
+    fz = arena.vtx[:written, :, 2].astype(np.float64) / 16.0
+    depth = (
+        arena.x[:written].astype(np.float64)
+        + arena.y[:written].astype(np.float64)
+        + arena.z[:written].astype(np.float64)
+        + (fx + fy + fz).mean(axis=1)
+    )
+    if override is not None and len(override):
+        known = ~np.isnan(override)
+        tail = depth[written - len(override) :]
+        tail[known] = override[known]
+    return depth
 
 
 def _camera_row_counts(luts: _Luts, tier_map: np.ndarray) -> np.ndarray:
@@ -247,6 +443,7 @@ def _empty_scene() -> _Scene:
         {},
         2,
         4,
+        None,
     )
 
 

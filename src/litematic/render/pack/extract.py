@@ -1,6 +1,7 @@
 """Pack extraction orchestration: blockstates → quads → npz."""
 
 import io
+import json
 import zipfile
 from pathlib import Path
 from typing import Any, NamedTuple, Sequence
@@ -9,15 +10,17 @@ import numpy as np
 
 from litematic.render.errors import RenderError
 from litematic.render.pack.blockstate import _block_id
-from litematic.render.pack.compile import _extract_block
+from litematic.render.pack.compile import _extract_block, _model_quads_key
 from litematic.render.pack.elements import _unit_cube_occl
-from litematic.render.pack.resolve import _tint_for
+from litematic.render.pack.resolve import FRAME_PAD_KEY, _tint_for
 from litematic.render.pack.stack import PackStack, open_stack
 from litematic.render.pack.texture import (
     _Budget,
+    _cached_model,
     _load_texture,
     _register_array,
     _register_wire_dust,
+    _resolve_ref,
     _texture_key,
 )
 from litematic.render.quads import sort_quads, unit_cube_quads
@@ -126,6 +129,14 @@ def _extract_pack(
             if parts_json is not None:
                 parts_map[f"parts/{block_id}"] = parts_json
             blocks += 1
+        items_map = _extract_items(
+            stack, texture_cache, tex_arrays, model_cache, budget
+        )
+        _extract_frame_pad(
+            stack, texture_cache, tex_arrays, model_cache,
+            mquad_cache, mquad_map, budget,
+        )
+        _register_direct_items(stack, texture_cache, tex_arrays, budget)
         for ns, stem in _fallback_blocks(names):
             block_id = f"{ns}:{stem}"
             if block_id in covered:
@@ -158,7 +169,7 @@ def _extract_pack(
             _register_wire_dust(stack, ns, texture_cache, tex_arrays, budget)
     _write_npz(
         Path(dest), tex_arrays, quad_map, occl_map, parts_map, mquad_map,
-        pack_mtime,
+        pack_mtime, items_map,
     )
     return ExtractSummary(Path(dest), blocks, skipped)
 
@@ -206,6 +217,168 @@ def _fallback_array_key(
 
 
 
+_ARMORSTAND_TEXKEY = "entity/armorstand/armorstand"
+
+
+
+def _extract_frame_pad(
+    stack: PackStack,
+    texture_cache: dict[str, np.ndarray | None],
+    tex_arrays: dict[str, np.ndarray],
+    model_cache: dict[str, dict[str, Any] | None],
+    mquad_cache: dict[str, str | None],
+    mquad_out: dict[str, np.ndarray],
+    budget: _Budget,
+) -> None:
+    """Compile the vanilla item-frame model once for compose to rotate."""
+    subkey = _model_quads_key(
+        stack, "minecraft", "minecraft:block/item_frame", 0, 0, False,
+        "minecraft:item_frame", model_cache, texture_cache, tex_arrays,
+        mquad_cache, mquad_out, budget,
+    )
+    if subkey is not None:
+        mquad_out.setdefault(FRAME_PAD_KEY, mquad_out[subkey])
+
+
+
+def _extract_items(
+    stack: PackStack,
+    texture_cache: dict[str, np.ndarray | None],
+    tex_arrays: dict[str, np.ndarray],
+    model_cache: dict[str, dict[str, Any] | None],
+    budget: _Budget,
+) -> dict[str, dict[str, str]]:
+    """Classify 1.21.9 item assets: block models or generated sprites.
+
+    Two sources: items/<id>.json definitions (block items point straight
+    at models/block/) and models/item/<id>.json chains ending at
+    builtin/generated (flat sprites). Unresolvable or non-model types
+    stay unrecorded.
+    """
+    items: dict[str, dict[str, str]] = {}
+    for path in sorted(stack.names()):
+        if not path.startswith("assets/") or not path.endswith(".json"):
+            continue
+        parts = path.split("/")
+        ns, stem = parts[1], parts[-1][: -len(".json")]
+        if len(parts) == 4 and parts[2] == "items":
+            data = _read_json(stack, path)
+            model = data.get("model") if isinstance(data, dict) else None
+            if not isinstance(model, dict) or model.get("type") != "minecraft:model":
+                continue
+            ref = model.get("model")
+            if isinstance(ref, str) and ref:
+                _classify_item_ref(
+                    ns, ref, f"{ns}:{stem}", items, stack,
+                    texture_cache, tex_arrays, model_cache, budget,
+                )
+        elif len(parts) == 5 and parts[2] == "models" and parts[3] == "item":
+            _classify_item_ref(
+                ns, f"{ns}:item/{stem}", f"{ns}:{stem}", items, stack,
+                texture_cache, tex_arrays, model_cache, budget,
+            )
+    raw = _load_texture(
+        stack, "minecraft", _ARMORSTAND_TEXKEY, _ARMORSTAND_TEXKEY,
+        texture_cache, budget,
+    )
+    if raw is not None:
+        tex_arrays.setdefault(_ARMORSTAND_TEXKEY, raw)
+    return items
+
+
+def _classify_item_ref(
+    ns: str,
+    ref: str,
+    item_id: str,
+    items: dict[str, dict[str, str]],
+    stack: PackStack,
+    texture_cache: dict[str, np.ndarray | None],
+    tex_arrays: dict[str, np.ndarray],
+    model_cache: dict[str, dict[str, Any] | None],
+    budget: _Budget,
+) -> None:
+    """Record one item as block-model or flat sprite, or leave it out."""
+    if item_id in items:
+        return
+    model = _cached_model(stack, ns, ref, model_cache)
+    if model is None:
+        return
+    if model["elements"] is not None:
+        block_id = _block_id_of_ref(ns, ref)
+        if block_id is not None:
+            items[item_id] = {"block": block_id}
+        return
+    if not model.get("builtin_cut"):
+        return
+    textures = model["textures"]
+    layer0 = _resolve_ref(textures.get("layer0"), textures)
+    if layer0 is None:
+        return
+    tex_key = _texture_key(layer0, ns)
+    raw = _load_texture(stack, ns, layer0, tex_key, texture_cache, budget)
+    if raw is None:
+        return
+    tint = _tint_for(item_id, "")
+    items[item_id] = {"flat": _register_array(raw, tex_key, tint, tex_arrays)}
+
+
+def _block_id_of_ref(ns: str, ref: str) -> str | None:
+    """Map a model ref like minecraft:block/stone to the block id."""
+    ref_ns, _, path = ref.partition(":")
+    if not path:
+        ref_ns, path = ns, ref_ns
+    if not path.startswith("block/"):
+        return None
+    stem = path[len("block/") :]
+    if not stem or "/" in stem:
+        return None
+    return f"{ref_ns}:{stem}"
+
+
+def _register_direct_items(
+    stack: PackStack,
+    texture_cache: dict[str, np.ndarray | None],
+    tex_arrays: dict[str, np.ndarray],
+    budget: _Budget,
+) -> None:
+    """Register textures/item/*.png so texture-only packs render entities.
+
+    Vanilla packs already cover these through the model walk; the
+    setdefault only fills the gaps (texture-only add-ons, unmodeled items).
+    """
+    for path in sorted(stack.names()):
+        parts = path.split("/")
+        if (
+            len(parts) != 5
+            or parts[0] != "assets"
+            or parts[2] != "textures"
+            or parts[3] != "item"
+            or not parts[4].endswith(".png")
+        ):
+            continue
+        stem = parts[4][: -len(".png")]
+        if not stem or "/" in stem:
+            continue
+        tex_key = f"item/{stem}"
+        if tex_key in tex_arrays:
+            continue
+        raw = _load_texture(
+            stack, parts[1], f"item/{stem}", tex_key, texture_cache, budget
+        )
+        if raw is not None:
+            tex_arrays.setdefault(tex_key, raw)
+
+
+def _read_json(stack: PackStack, path: str) -> Any:
+    raw = stack.read(path)
+    if raw is None:  # unreachable: the path came from the stack enumeration
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
 def _write_npz(
     dest: Path,
     tex_arrays: dict[str, np.ndarray],
@@ -214,10 +387,12 @@ def _write_npz(
     parts_map: dict[str, str],
     mquad_map: dict[str, np.ndarray],
     pack_mtime: float | tuple[float, ...],
+    items_map: dict[str, dict[str, str]],
 ) -> None:
     entries: dict[str, np.ndarray] = {
         "meta/version": np.array(_NPZ_VERSION),
         "meta/pack_mtime": np.array(pack_mtime),
+        "items": np.array(json.dumps(items_map)),
     }
     for array_key, array in tex_arrays.items():
         entries[f"tex/{array_key}"] = array
