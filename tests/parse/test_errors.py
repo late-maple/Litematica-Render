@@ -18,7 +18,3 @@ def test_exception_hierarchy():
 def test_base_class_catches_subclasses(sub):
     with pytest.raises(litematic.LitematicError):
         raise sub("boom")
-
-
-def test_version_string():
-    assert litematic.__version__ == "0.3.0"

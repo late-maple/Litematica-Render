@@ -28,6 +28,7 @@ Thumbs.db
 
 # Local-only files (not tracked)
 AGENTS.md
+GLOSSARY.md
 docs/
 test/
 .scratch

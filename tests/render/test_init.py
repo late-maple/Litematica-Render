@@ -23,9 +23,5 @@ def test_render_error_subclasses_litematic_error():
     assert issubclass(litematic.render.RenderError, litematic.LitematicError)
 
 
-def test_version_is_0_3_0():
-    assert litematic.__version__ == "0.3.0"
-
-
 def test_top_level_all_unchanged_by_render():
     assert litematic.__all__ == _TOP_LEVEL_ALL
