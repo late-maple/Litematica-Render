@@ -102,7 +102,7 @@ def _scene(blocks, textures=TEX, yaw=0):
 
 def test_isolated_cube_face_brightness_vanilla():
     img = _paint(_scene([("minecraft:stone", {}, 0, 0, 0)]), 4, _BG)
-    assert img.shape == (20, 24, 4)
+    assert img.shape == (20, 20, 4)
     assert tuple(img[4, 8]) == (200, 30, 30, 255)  # top, light 1.0
     assert tuple(img[10, 4]) == (160, 24, 24, 255)  # south, light 0.8
     assert tuple(img[10, 12]) == (120, 18, 18, 255)  # east, light 0.6

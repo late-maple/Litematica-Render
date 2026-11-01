@@ -34,6 +34,7 @@ from litematic.render.scene.view import (
 )
 
 _AIR_NAMES = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air"}
+_SPAN_SNAP = 1e-9
 _WATER_FAMILY = {"minecraft:water", "minecraft:bubble_column"}
 _Y_SLAB = 64
 
@@ -183,8 +184,8 @@ def _compose_inner(
     y = y - int(y.min())
     z = z - int(z.min())
     c0, c1, r0, r1 = project_bounds(x, y, z, arena.vtx[:written], axes)
-    span_w = int(math.ceil(c1 - c0)) + 1
-    span_h = int(math.ceil(r1 - r0)) + 1
+    span_w = int(math.ceil(c1 - c0 - _SPAN_SNAP)) + 1
+    span_h = int(math.ceil(r1 - r0 - _SPAN_SNAP)) + 1
     return _Scene(
         x.astype(np.int32),
         y.astype(np.int32),

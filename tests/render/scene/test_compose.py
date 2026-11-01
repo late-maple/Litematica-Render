@@ -24,7 +24,7 @@ from litematic.render.quads import (
 from litematic.render.scene import isometric as isometric_mod
 from litematic.render.scene.isometric import _compose as _compose_view
 from litematic.render.scene.isometric import _vertex_ao
-from litematic.render.scene.view import ISO_SLANT_DEG
+from litematic.render.scene.view import ISO_SLANT_DEG, ViewAxes
 from litematic.render.shapes import builtin_quads
 
 
@@ -130,7 +130,7 @@ def test_scene_expands_states_to_quads():
     schem = _schematic([("Main", (0, 0, 0), (2, 1, 1), palette, indices)])
     scene = _compose(schem, 0, _textures(True))
     assert len(scene.quad_shade) == 6  # 3 camera-facing faces per block
-    assert (scene.span_w, scene.span_h) == (8, 6)
+    assert (scene.span_w, scene.span_h) == (7, 6)
     table = list(scene.texkeys)
     assert set(table) == {"block/stone", _MAGENTA_TEXKEY}
     ids = scene.texkey_ids.tolist()
@@ -306,7 +306,7 @@ def test_multi_region_offsets_and_spans():
     ]
     scene = _compose(_schematic(regions), 0, _textures(True))
     assert _scene_tuples(scene) == [(0, 0, 0), (10, 0, 0)]
-    assert (scene.span_w, scene.span_h) == (26, 15)
+    assert (scene.span_w, scene.span_h) == (25, 15)
 
 
 def test_all_air_returns_empty_scene():
@@ -1163,3 +1163,28 @@ def test_entity_anchors_stay_world_fixed():
         anchor_x = scene.x[rows][0]
         anchor_z = scene.z[rows][0]
         assert (anchor_x, anchor_z) == (0, 0), yaw
+
+
+def test_span_survives_axis_ulp_noise(monkeypatch):
+    """Platform trig differs by 1 ULP; the span ceil must not flip."""
+    real = isometric_mod.view_axes
+
+    def noisy(rotation, slant):
+        axes = real(rotation, slant)
+        return ViewAxes(
+            np.nextafter(axes.right, np.inf),
+            np.nextafter(axes.up, -np.inf),
+            np.nextafter(axes.toward, np.inf),
+            axes.tiers,
+        )
+
+    monkeypatch.setattr(isometric_mod, "view_axes", noisy)
+    palette = [
+        ("minecraft:air", {}),
+        ("minecraft:stone", {}),
+        ("minecraft:gold_block", {}),
+    ]
+    indices = np.array([1, 2], dtype=np.uint16)
+    schem = _schematic([("Main", (0, 0, 0), (2, 1, 1), palette, indices)])
+    scene = _compose(schem, 0, _textures(True))
+    assert (scene.span_w, scene.span_h) == (7, 6)
