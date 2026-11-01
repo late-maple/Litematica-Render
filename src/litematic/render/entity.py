@@ -20,20 +20,13 @@ ITEM_MINI_BASE = 2.6
 _FACING_TURNS = {"south": 2, "north": 0, "east": 3, "west": 1}
 # Vanilla Facing NBT byte -> facing name (up/down unsupported in v1).
 _NBT_FACING = {0: "down", 1: "up", 2: "north", 3: "south", 4: "west", 5: "east"}
-# Step from the frame's cell toward the cell its front faces.
-_FACING_STEP = {
-    "south": (0, 0, 1),
-    "north": (0, 0, -1),
-    "east": (1, 0, 0),
-    "west": (-1, 0, 0),
-}
 _ARMORSTAND_TEXKEY = "entity/armorstand/armorstand"
 
 # Face tiers after one 90-degree turn (south -> east), matching compose.
 _TIER_TURNS = {
-    1: np.array([0, 1, 4, 5, 2, 3], np.uint8),
+    1: np.array([0, 1, 4, 5, 3, 2], np.uint8),
     2: np.array([0, 1, 3, 2, 5, 4], np.uint8),
-    3: np.array([0, 1, 5, 4, 3, 2], np.uint8),
+    3: np.array([0, 1, 5, 4, 2, 3], np.uint8),
 }
 
 

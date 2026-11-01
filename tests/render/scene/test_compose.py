@@ -22,8 +22,18 @@ from litematic.render.quads import (
     unit_cube_quads,
 )
 from litematic.render.scene import isometric as isometric_mod
-from litematic.render.scene.isometric import _compose, _vertex_ao
+from litematic.render.scene.isometric import _compose as _compose_view
+from litematic.render.scene.isometric import _vertex_ao
+from litematic.render.scene.view import ISO_SLANT_DEG
 from litematic.render.shapes import builtin_quads
+
+
+def _compose(schem, yaw, textures, entities=True):
+    """Preset shim: legacy yaw index to (rotation, slant) for call sites."""
+    return _compose_view(
+        schem, 45.0 + 90.0 * yaw, ISO_SLANT_DEG, textures, entities
+    )
+
 
 _STONE = (140, 140, 140, 255)
 
@@ -120,7 +130,7 @@ def test_scene_expands_states_to_quads():
     schem = _schematic([("Main", (0, 0, 0), (2, 1, 1), palette, indices)])
     scene = _compose(schem, 0, _textures(True))
     assert len(scene.quad_shade) == 6  # 3 camera-facing faces per block
-    assert (scene.span_w, scene.span_h) == (3, 5)
+    assert (scene.span_w, scene.span_h) == (8, 6)
     table = list(scene.texkeys)
     assert set(table) == {"block/stone", _MAGENTA_TEXKEY}
     ids = scene.texkey_ids.tolist()
@@ -129,7 +139,7 @@ def test_scene_expands_states_to_quads():
     assert scene.texkeys[_MAGENTA_TEXKEY].shape == (16, 16, 4)
 
 
-def test_yaw_remaps_tier_and_vertices():
+def test_camera_sees_world_facing_tiers():
     quads = np.empty(1, QUAD_DTYPE)
     quads["vtx"] = [[(0, 16, 16), (16, 16, 16), (16, 0, 16), (0, 0, 16)]]
     quads["uv"] = [[(1, 2), (15, 2), (15, 14), (1, 14)]]
@@ -146,12 +156,15 @@ def test_yaw_remaps_tier_and_vertices():
         parts_map={},
         mquad_map={},
     )
-    scene = _compose(_single_block("minecraft:stone"), 1, tex)
-    assert scene.quad_shade.tolist() == [TIER_EAST]
-    assert scene.quad_uv.tolist() == [[[1, 2], [15, 2], [15, 14], [1, 14]]]
-    assert scene.quad_vtx.tolist() == [
-        [[16, 16, 16], [16, 16, 0], [16, 0, 0], [16, 0, 16]]
+    schem = _single_block("minecraft:stone")
+    seen = _compose_view(schem, 45.0, ISO_SLANT_DEG, tex)
+    assert seen.quad_shade.tolist() == [TIER_SOUTH]
+    assert seen.quad_uv.tolist() == [[[1, 2], [15, 2], [15, 14], [1, 14]]]
+    assert seen.quad_vtx.tolist() == [
+        [[0, 16, 16], [16, 16, 16], [16, 0, 16], [0, 0, 16]]
     ]
+    hidden = _compose_view(schem, 225.0, ISO_SLANT_DEG, tex)
+    assert len(hidden.x) == 0
 
 
 def test_camera_face_filter_keeps_three_tiers():
@@ -193,15 +206,15 @@ def test_occl_read_from_pack_flag():
     assert (1, 1, 1) in _scene_tuples(kept)
 
 
-def test_culling_dirs_follow_yaw():
-    cells = [(x, y, z) for x in range(2) for y in range(2) for z in range(2)]
+def test_enclosed_cell_culled_at_every_rotation():
+    cells = [(x, y, z) for x in range(3) for y in range(3) for z in range(3)]
     schem = _cell_schematic(cells)
-    full = sorted(cells)
+    shell = [cell for cell in cells if cell != (1, 1, 1)]
     for yaw in range(4):
         scene = _compose(schem, yaw, _textures(True))
         seen = _scene_tuples(scene)
-        assert (0, 0, 0) not in seen, yaw
-        assert seen == [cell for cell in full if cell != (0, 0, 0)], yaw
+        assert (1, 1, 1) not in seen, yaw
+        assert seen == shell, yaw
 
 
 def test_air_at_nonzero_palette_index_excluded():
@@ -220,7 +233,7 @@ def test_air_at_nonzero_palette_index_excluded():
     assert _scene_tuples(scene) == [(0, 0, 0)]
 
 
-def test_yaw_rotation_quadrants():
+def test_cells_stay_world_fixed_across_rotations():
     tex = Resolver(
         version="pack-quads",
         arrays={
@@ -246,18 +259,12 @@ def test_yaw_rotation_quadrants():
     indices[2] = 1  # stone at (x=2, y=0, z=0) in yzx order
     indices[6] = 2  # gold at (x=0, y=0, z=2)
     schem = _schematic([("Main", (0, 0, 0), (3, 1, 3), palette, indices)])
-    expected = {
-        0: ((2, 0, 0), (0, 0, 2)),
-        1: ((0, 0, 0), (2, 0, 2)),
-        2: ((0, 0, 2), (2, 0, 0)),
-        3: ((2, 0, 2), (0, 0, 0)),
-    }
-    for yaw, (stone_pos, gold_pos) in expected.items():
+    for yaw in range(4):
         scene = _compose(schem, yaw, tex)
         table = list(scene.texkeys)
-        assert _cells_of(scene, table.index("block/stone")) == [stone_pos], yaw
+        assert _cells_of(scene, table.index("block/stone")) == [(2, 0, 0)], yaw
         assert _cells_of(scene, table.index("block/gold_block")) == [
-            gold_pos
+            (0, 0, 2)
         ], yaw
 
 
@@ -299,7 +306,7 @@ def test_multi_region_offsets_and_spans():
     ]
     scene = _compose(_schematic(regions), 0, _textures(True))
     assert _scene_tuples(scene) == [(0, 0, 0), (10, 0, 0)]
-    assert (scene.span_w, scene.span_h) == (12, 14)
+    assert (scene.span_w, scene.span_h) == (26, 15)
 
 
 def test_all_air_returns_empty_scene():
@@ -1147,11 +1154,12 @@ def test_unknown_entity_types_skip_silently():
     ) - _entity_rows_of(scene, "item").sum()
 
 
-def test_entity_anchors_follow_yaw_rotation():
+def test_entity_anchors_stay_world_fixed():
     schem = _entity_schematic([_item_nbt(0.5, 0.0, 0.5)])
-    scene = _compose(schem, 1, _entity_textures())
-    rows = _entity_rows_of(scene, "item/wheat_seeds")
-    assert rows.any()
-    anchor_x = scene.x[rows][0]
-    anchor_z = scene.z[rows][0]
-    assert (anchor_x, anchor_z) == (0, 1)  # yaw 1: (x, z) -> (z, W-1-x)
+    for yaw in range(4):
+        scene = _compose(schem, yaw, _entity_textures())
+        rows = _entity_rows_of(scene, "item/wheat_seeds")
+        assert rows.any(), yaw
+        anchor_x = scene.x[rows][0]
+        anchor_z = scene.z[rows][0]
+        assert (anchor_x, anchor_z) == (0, 0), yaw

@@ -9,8 +9,17 @@ from litematic.render.errors import RenderError
 from litematic.render.pack.resolve import Resolver
 from litematic.render.quads import QUAD_DTYPE, TIER_SOUTH, unit_cube_quads
 from litematic.render.scene import painter as painter_mod
-from litematic.render.scene.isometric import _compose
+from litematic.render.scene.isometric import _compose as _compose_view
 from litematic.render.scene.painter import _paint
+from litematic.render.scene.view import ISO_SLANT_DEG
+
+
+def _compose(schem, yaw, textures, entities=True):
+    """Preset shim: legacy yaw index to (rotation, slant) for call sites."""
+    return _compose_view(
+        schem, 45.0 + 90.0 * yaw, ISO_SLANT_DEG, textures, entities
+    )
+
 
 _BG = (0, 0, 0, 0)
 _STONE = (200, 30, 30, 255)
@@ -64,7 +73,7 @@ def _raw_quad_pack(quads, color):
     )
 
 
-def _scene(blocks, textures=TEX):
+def _scene(blocks, textures=TEX, yaw=0):
     """Compose the given (name, properties, x, y, z) blocks into a scene."""
     palette = [("minecraft:air", {})] + [
         (name, dict(props)) for name, props, *_ in blocks
@@ -88,12 +97,12 @@ def _scene(blocks, textures=TEX):
             ]
         )
     )
-    return _compose(schem, 0, textures)
+    return _compose(schem, yaw, textures)
 
 
 def test_isolated_cube_face_brightness_vanilla():
     img = _paint(_scene([("minecraft:stone", {}, 0, 0, 0)]), 4, _BG)
-    assert img.shape == (16, 16, 4)
+    assert img.shape == (20, 24, 4)
     assert tuple(img[4, 8]) == (200, 30, 30, 255)  # top, light 1.0
     assert tuple(img[10, 4]) == (160, 24, 24, 255)  # south, light 0.8
     assert tuple(img[10, 12]) == (120, 18, 18, 255)  # east, light 0.6
@@ -244,11 +253,30 @@ def test_empty_scene_paints_background():
         )
     )
     img = _paint(_compose(schem, 0, TEX), 2, _BG)
-    assert img.shape == (8, 8, 4)
+    assert img.shape == (8, 4, 4)
     assert (img == 0).all()
 
 
-def test_negative_projection_stays_off_canvas():
+def test_double_sided_sprite_lit_from_both_sides():
+    """Fixed-tier decals keep their legacy light on every camera side."""
+    quads = np.empty(1, QUAD_DTYPE)
+    quads["vtx"] = [[(0, 16, 16), (16, 16, 16), (16, 0, 16), (0, 0, 16)]]
+    quads["uv"] = [[(0, 0), (16, 0), (16, 16), (0, 16)]]
+    quads["texkey"] = "block/odd"
+    quads["shade"] = TIER_SOUTH
+    quads["dbl"] = True
+    pack = _raw_quad_pack(quads, _ODD)
+    expected = {0: (72, 160, 72), 1: (54, 120, 54),
+                2: (72, 160, 72), 3: (54, 120, 54)}
+    for yaw, color in expected.items():
+        scene = _scene([("minecraft:odd", {}, 0, 0, 0)], pack, yaw=yaw)
+        img = _paint(scene, 4, _BG)
+        painted = {tuple(px[:3]) for px in img.reshape(-1, 4).tolist() if px[3]}
+        assert painted == {color}, yaw
+
+
+def test_extended_vertices_render_fully():
+    """Vertices beyond the cell grow the projection bounds, no clipping."""
     quads = np.empty(1, QUAD_DTYPE)
     quads["vtx"] = [[(-8, 16, 16), (8, 16, 16), (8, 0, 16), (-8, 0, 16)]]
     quads["uv"] = [[(0, 0), (16, 0), (16, 16), (0, 16)]]
@@ -258,23 +286,9 @@ def test_negative_projection_stays_off_canvas():
     pack = _raw_quad_pack(quads, _ODD)
     scene = _scene([("minecraft:odd", {}, 0, 0, 0)], pack)
     img = _paint(scene, 2, _BG)
-    assert int((img[..., 3] != 0).sum()) == 8
-    assert set(np.nonzero(img[..., 3])[1].tolist()) == {0, 1}
+    assert int((img[..., 3] != 0).sum()) == 16
     painted = {tuple(px) for px in img.reshape(-1, 4).tolist() if px[3]}
     assert painted == {(72, 160, 72, 255)}
-
-
-def test_overflow_projection_clipped_silently():
-    quads = np.empty(1, QUAD_DTYPE)
-    quads["vtx"] = [[(32, 16, 16), (48, 16, 16), (48, 0, 16), (32, 0, 16)]]
-    quads["uv"] = [[(0, 0), (16, 0), (16, 16), (0, 16)]]
-    quads["texkey"] = "block/odd"
-    quads["shade"] = TIER_SOUTH
-    quads["dbl"] = False
-    pack = _raw_quad_pack(quads, _ODD)
-    scene = _scene([("minecraft:odd", {}, 0, 0, 0)], pack)
-    img = _paint(scene, 2, _BG)
-    assert (img == 0).all()
 
 
 def test_non_parallelogram_quad_fails_fast():
@@ -365,8 +379,8 @@ def test_mixed_shape_layer_deterministic():
     assert first.tobytes() == second.tobytes()
 
 
-# Sort-once layering: depth layers are contiguous slices of one stable
-# argsort; oversize layers split into sub-batches with identical output.
+# Z-buffer ordering: nearer fragments win regardless of input order, and
+# coplanar ties fall back to stable paint order.
 
 
 def _depth_duplicate_scene():
@@ -380,22 +394,30 @@ def _depth_duplicate_scene():
     )
 
 
-def test_layer_order_matches_unique_scan():
-    scene = _depth_duplicate_scene()
-    t = 2
-    reference = np.empty((t * scene.span_h, 2 * t * scene.span_w, 4), np.uint8)
-    reference[:] = _BG
-    stacks, group_ids, slot_ids = painter_mod._texture_stack(scene)
-    quad_group = group_ids[scene.texkey_ids]
-    quad_slot = slot_ids[scene.texkey_ids]
-    sx, sy = painter_mod._project(scene, t)
-    depth = painter_mod._depth(scene)
-    for value in np.unique(depth):
-        layer = np.nonzero(depth == value)[0]
-        painter_mod._paint_layer(
-            reference, scene, layer, sx, sy, stacks, quad_group, quad_slot
-        )
-    assert reference.tobytes() == _paint(scene, t, _BG).tobytes()
+def test_nearer_block_wins_over_input_order():
+    textures = Resolver(
+        version="pack-quads",
+        arrays={
+            "block/far": np.full((16, 16, 4), (255, 0, 0, 255), np.uint8),
+            "block/near": np.full((16, 16, 4), (0, 0, 255, 255), np.uint8),
+        },
+        quads_map={
+            "minecraft:far[]": unit_cube_quads("block/far"),
+            "minecraft:near[]": unit_cube_quads("block/near"),
+        },
+        occl_map={"minecraft:far[]": False, "minecraft:near[]": False},
+        pack_mtime=0.0,
+        states=None,
+        parts_map={},
+        mquad_map={},
+    )
+    # (1,1,1) sits one camera step in front of (0,0,0): identical screen
+    # footprint, nearer depth, listed second.
+    blocks = [("minecraft:far", {}, 0, 0, 0), ("minecraft:near", {}, 1, 1, 1)]
+    img = _paint(_scene(blocks, textures), 4, _BG)
+    painted = {tuple(px) for px in img.reshape(-1, 4).tolist() if px[3]}
+    assert (0, 0, 204, 255) in painted
+    assert (204, 0, 0, 255) not in painted
 
 
 def test_equal_depth_preserves_index_order():
@@ -416,7 +438,7 @@ def test_equal_depth_preserves_index_order():
         mquad_map={},
     )
     img = _paint(_scene([("minecraft:odd", {}, 0, 0, 0)], textures), 4, _BG)
-    assert tuple(img[10, 4]) == (0, 0, 204, 255)  # later quad's cover wins
+    assert tuple(img[6, 4]) == (0, 0, 204, 255)  # later quad's cover wins
 
 
 def test_subbatch_valve_identical_output(monkeypatch):

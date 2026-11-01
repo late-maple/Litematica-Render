@@ -12,6 +12,7 @@ from litematic.render.pack import load_pack
 from litematic.render.png import encode_png
 from litematic.render.scene.isometric import _AIR_NAMES, _compose
 from litematic.render.scene.painter import _choose_scale, _downsample, _paint
+from litematic.render.scene.view import ISO_SLANT_DEG, view_axes
 
 __all__ = [
     "RenderError",
@@ -31,14 +32,13 @@ def isometric(
     textures_path: str | Path | None = None,
     extra_packs: Sequence[str | Path] = (),
     entities: bool = True,
-    yaw: int = 0,
+    rotation: float = 45.0,
+    slant: float = ISO_SLANT_DEG,
     max_size: int = 2048,
     supersample: int = 2,
     background: tuple[int, int, int, int] | None = None,
 ) -> np.ndarray:
     """Render a schematic to an RGBA isometric image within max_size."""
-    if yaw not in (0, 1, 2, 3):
-        raise RenderError(f"render: yaw must be 0-3, got {yaw}")
     if not _MAX_SIZE_BOUNDS[0] <= max_size <= _MAX_SIZE_BOUNDS[1]:
         raise RenderError(
             f"render: max_size must be "
@@ -46,14 +46,16 @@ def isometric(
         )
     if not _SS_BOUNDS[0] <= supersample <= _SS_BOUNDS[1]:
         raise RenderError(
-            f"render: supersample must be {_SS_BOUNDS[0]}-{_SS_BOUNDS[1]}, "
-            f"got {supersample}"
+            f"render: supersample must be "
+            f"{_SS_BOUNDS[0]}-{_SS_BOUNDS[1]}, got {supersample}"
         )
     if not isinstance(entities, bool):
         raise RenderError(f"render: entities must be a boolean, got {entities!r}")
+    # Validate angles before any pack work so bad views fail fast.
+    view_axes(rotation, slant)
     bg = _background(background)
     textures = load_pack(_require_pack(textures_path), extra_packs)
-    scene = _compose(schem, yaw, textures, entities)
+    scene = _compose(schem, rotation, slant, textures, entities)
     if len(scene.x) == 0:
         raise RenderError("render: no blocks to render")
     t, _ = _choose_scale(scene.span_w, scene.span_h, max_size, supersample)
@@ -73,7 +75,8 @@ def isometric_png(
     textures_path: str | Path | None = None,
     extra_packs: Sequence[str | Path] = (),
     entities: bool = True,
-    yaw: int = 0,
+    rotation: float = 45.0,
+    slant: float = ISO_SLANT_DEG,
     max_size: int = 2048,
     supersample: int = 2,
     background: tuple[int, int, int, int] | None = None,
@@ -85,7 +88,8 @@ def isometric_png(
             textures_path=textures_path,
             extra_packs=extra_packs,
             entities=entities,
-            yaw=yaw,
+            rotation=rotation,
+            slant=slant,
             max_size=max_size,
             supersample=supersample,
             background=background,

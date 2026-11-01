@@ -39,6 +39,17 @@ TIER_SOUTH = 3
 TIER_WEST = 4
 TIER_EAST = 5
 
+# World-space face normal per tier; shared by view visibility and lighting.
+TIER_NORMALS = np.zeros((6, 3), np.float64)
+TIER_NORMALS[TIER_DOWN] = (0, -1, 0)
+TIER_NORMALS[TIER_UP] = (0, 1, 0)
+TIER_NORMALS[TIER_NORTH] = (0, 0, -1)
+TIER_NORMALS[TIER_SOUTH] = (0, 0, 1)
+TIER_NORMALS[TIER_WEST] = (-1, 0, 0)
+TIER_NORMALS[TIER_EAST] = (1, 0, 0)
+
+# Legacy vanilla per-tier face light; the painter's camera-locked light
+# reproduces these values at the preset view.
 FACE_LIGHT = (0.5, 1.0, 0.8, 0.8, 0.6, 0.6)
 AO_LEVELS = (0.4, 0.6, 0.8, 1.0)
 

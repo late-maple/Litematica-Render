@@ -8,16 +8,16 @@ from litematic.render.scene.painter import _choose_scale, _downsample
 
 
 def test_choose_scale_picks_largest_fitting_t():
-    assert _choose_scale(10, 12, 2048, 2) == (204, 2)
+    assert _choose_scale(10, 12, 2048, 2) == (341, 2)
 
 
 def test_choose_scale_downgrades_supersample_for_fuse():
-    assert _choose_scale(2000, 2000, 8192, 4) == (2, 1)
+    assert _choose_scale(3000, 1000, 8192, 4) == (2, 1)
 
 
 def test_choose_scale_unsatisfiable_raises():
     with pytest.raises(RenderError):
-        _choose_scale(4000, 6000, 2048, 1)
+        _choose_scale(6000, 6000, 2048, 1)
 
 
 def test_choose_scale_floor_t_one_fits_fuse_over_max_size():
@@ -25,7 +25,7 @@ def test_choose_scale_floor_t_one_fits_fuse_over_max_size():
 
 
 def test_choose_scale_accepts_fuse_boundary():
-    assert _choose_scale(2048, 2048, 8192, 1) == (2, 1)
+    assert _choose_scale(2796, 2796, 8192, 1) == (2, 1)
 
 
 def test_downsample_2x2_to_one_pixel_means():

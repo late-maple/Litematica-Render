@@ -158,3 +158,29 @@ def test_frame_pad_falls_back_to_frame_sprite_for_texture_only_packs():
     assert "item/item_frame" in keys and "item/diamond" in keys
     pad = quads[quads["texkey"] == "item/item_frame"]
     assert (pad["vtx"][0][:, 2] == 15.5).all()  # wall plane stand-in
+
+
+def test_tier_turns_match_vertex_turn_geometry():
+    from litematic.render.entity import _TIER_TURNS
+
+    normals = {
+        0: (0, -1, 0),
+        1: (0, 1, 0),
+        2: (0, 0, -1),
+        3: (0, 0, 1),
+        4: (-1, 0, 0),
+        5: (1, 0, 0),
+    }
+    to_tier = {v: k for k, v in normals.items()}
+    for turns in (1, 2, 3):
+        assert (_TIER_TURNS[turns][0], _TIER_TURNS[turns][1]) == (0, 1)
+        for tier in (2, 3, 4, 5):
+            normal = normals[tier]
+            dx, dz = normal[0], normal[2]
+            if turns == 1:
+                nx, nz = dz, -dx
+            elif turns == 2:
+                nx, nz = -dx, -dz
+            else:
+                nx, nz = -dz, dx
+            assert _TIER_TURNS[turns][tier] == to_tier[(nx, 0, nz)]

@@ -121,9 +121,14 @@ def test_all_air_rejected(tmp_path):
         isometric(schem, textures_path=pack)
 
 
-def test_yaw_out_of_range():
-    with pytest.raises(RenderError, match="yaw must be 0-3"):
-        isometric(_schem(_TWO), textures_path=None, yaw=4)
+def test_slant_out_of_range():
+    with pytest.raises(RenderError, match="slant must be in"):
+        isometric(_schem(_TWO), textures_path=None, slant=90.5)
+
+
+def test_rotation_must_be_numeric():
+    with pytest.raises(RenderError, match="rotation must be a number"):
+        isometric(_schem(_TWO), textures_path=None, rotation="45")
 
 
 def test_param_bounds_rejected(tmp_path):
