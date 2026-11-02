@@ -4,6 +4,7 @@ from collections.abc import Mapping
 
 import numpy as np
 
+from litematic.parse.model import BlockState
 from litematic.render.pack.resolve import _MAGENTA_TEXKEY, FRAME_PAD_KEY
 from litematic.render.quads import CULL_NONE, QUAD_DTYPE, TIER_SOUTH
 
@@ -150,7 +151,7 @@ def _item_entry(item_id: str, textures) -> dict[str, str] | None:
 
 
 def _mini_block_quads(block_id: str, textures) -> np.ndarray | None:
-    quads = textures.pack_quads(block_id)
+    quads = _item_block_quads(block_id, textures)
     if quads is None or len(quads) == 0:
         return None
     out = quads.copy()
@@ -222,17 +223,43 @@ def _frame_pad_quads(facing: str, textures) -> np.ndarray | None:
 
 
 
-def item_content_texkey(item_id: str, textures) -> str | None:
-    """Flat texkey drawn for an item, or None when nothing can render it."""
+def item_content_quads(item_id: str, textures) -> np.ndarray | None:
+    """Cell-space content quads for one framed/held item, or None."""
     entry = _item_entry(item_id, textures)
     if entry is None:
         return None
     if "flat" in entry:
-        return entry["flat"] if entry["flat"] in textures.arrays else None
-    plate = textures.pack_quads(entry["block"])
+        if entry["flat"] not in textures.arrays:
+            return None
+        return _one_quad(entry["flat"], _frame_corners())
+    plate = _item_block_quads(entry["block"], textures)
     if plate is None or len(plate) == 0:
         return None
-    return str(plate["texkey"][0])
+    return _frame_mini_block(plate)
+
+
+
+def _item_block_quads(block_id: str, textures) -> np.ndarray | None:
+    """Representative-state resolve for a block shown as an item."""
+    state = BlockState(block_id, textures.representative_props(block_id))
+    resolution = textures.resolve(state)
+    if resolution.miss is not None:
+        return None
+    return resolution.quads
+
+
+
+def _frame_mini_block(plate: np.ndarray) -> np.ndarray:
+    """Half-size cube centered on the pad, front face flush at z=15."""
+    out = plate.copy()
+    vtx = out["vtx"]
+    x, y, z = vtx[..., 0].copy(), vtx[..., 1].copy(), vtx[..., 2].copy()
+    vtx[..., 0] = (16.0 - x) * 0.5 + 4.0
+    vtx[..., 1] = y * 0.5 + 4.0
+    vtx[..., 2] = (16.0 - z) * 0.5 + 7.0
+    out["dbl"] = True
+    out["cull"] = CULL_NONE
+    return out
 
 
 
@@ -241,14 +268,14 @@ def _frame_content_quads(
     item_id: str | None,
     textures,
 ) -> np.ndarray | None:
-    """Half-size sprite centered on the pad, flush with its front plane."""
+    """Half-size content centered on the pad, flush with its front plane."""
     if item_id is None:
         return None
-    texkey = item_content_texkey(item_id, textures)
+    content = item_content_quads(item_id, textures)
     sprite = (
         magenta_entity_quads()
-        if texkey is None
-        else _one_quad(texkey, _frame_corners())
+        if content is None
+        else content
     )
     return _turn_content(sprite, _as_int(properties.get("item_rotation", 0)) or 0)
 

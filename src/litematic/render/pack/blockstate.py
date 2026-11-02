@@ -56,6 +56,22 @@ def _when_matches(
 
 
 
+def _when_props(condition: Mapping[str, Any]) -> set[str]:
+    """Property names a multipart condition can test."""
+    props: set[str] = set()
+    if not isinstance(condition, Mapping):
+        return props
+    for key, expected in condition.items():
+        if key == "OR" or key == "AND":
+            if isinstance(expected, list):
+                for item in expected:
+                    props |= _when_props(item)
+        else:
+            props.add(str(key))
+    return props
+
+
+
 def _parse_blockstate(
     state: dict[str, Any],
 ) -> tuple[

@@ -12,6 +12,7 @@ from litematic.render.pack.blockstate import (
     _normalize_state_key,
     _state_pairs,
     _when_matches,
+    _when_props,
 )
 from litematic.render.quads import QUAD_DTYPE, _redstone_tint, unit_cube_quads
 from litematic.render.shapes import builtin_quads
@@ -26,6 +27,9 @@ _MAGENTA_TEXKEY = "__magenta__"
 FRAME_PAD_KEY = "__frame_pad"
 _MAGENTA_ARRAY = np.full((16, 16, 4), (255, 0, 255, 255), np.uint8)
 _MAGENTA_ARRAY.flags.writeable = False  # painter must never mutate in place
+
+# Vanilla default conventions for properties an item-only lookup must assume.
+_REPRESENTATIVE_VALUES = {"facing": "north", "up": "true", "axis": "y"}
 
 
 class Resolution(NamedTuple):
@@ -100,6 +104,23 @@ class Resolver:
     def pack_quads(self, name: str) -> np.ndarray | None:
         """The stateless pack quads for a block, or None when absent."""
         return self._pack_quads(name, {})
+
+    def representative_props(self, name: str) -> dict[str, str]:
+        """Properties standing in for the block when only its id is known."""
+        states = self.states.get(name, {}) if self.states else {}
+        ranked = [
+            (pairs.get("facing") != "north", key, pairs)
+            for key, pairs in states.items()
+        ]
+        if ranked:
+            return dict(min(ranked, key=lambda entry: entry[:2])[2])
+        record = self.parts_map.get(name)
+        if record is not None:
+            props: set[str] = set()
+            for part in json.loads(record)["parts"]:
+                props |= _when_props(part["when"])
+            return {p: _REPRESENTATIVE_VALUES.get(p, "false") for p in props}
+        return {}
 
     def _pack_quads(
         self, name: str, properties: Mapping[str, str]

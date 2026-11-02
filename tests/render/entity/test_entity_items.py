@@ -14,14 +14,14 @@ from litematic.render.pack.resolve import Resolver
 from litematic.render.quads import CULL_NONE, unit_cube_quads
 
 
-def _textures(item_display, quads_map=None, arrays=None):
+def _textures(item_display, quads_map=None, arrays=None, states=None):
     return Resolver(
         version="pack-quads.1",
         arrays=arrays or {},
         quads_map=quads_map or {},
         occl_map={},
         pack_mtime=0.0,
-        states=None,
+        states=states,
         parts_map={},
         mquad_map={},
         item_display=item_display,
@@ -68,6 +68,40 @@ def test_block_item_quads_scale_to_mini_cube():
     assert (quads["dbl"]).all()
     assert (quads["cull"] == CULL_NONE).all()
     assert {str(k) for k in quads["texkey"]} == {"block/stone"}
+
+
+def test_dropped_block_item_resolves_via_representative_state():
+    """Property-keyed blocks (furnace class) render as mini cubes now."""
+    states = {
+        "minecraft:furnace": {
+            "facing=north,lit=false": {"facing": "north", "lit": "false"},
+            "facing=east,lit=false": {"facing": "east", "lit": "false"},
+        }
+    }
+    textures = _textures(
+        {"minecraft:furnace": {"block": "minecraft:furnace"}},
+        quads_map={
+            "minecraft:furnace[facing=north,lit=false]": unit_cube_quads(
+                "block/stone"
+            )
+        },
+        arrays={"block/stone": np.zeros((16, 16, 4), np.uint8)},
+        states=states,
+    )
+    quads = item_entity_quads("minecraft:furnace", textures)
+    assert quads is not None and len(quads) == 6
+    assert {str(k) for k in quads["texkey"]} == {"block/stone"}
+
+
+def test_dropped_builtin_family_item_uses_builtin_backfill():
+    """No pack quads at all: builtin shapes backfilled from material keys."""
+    textures = _textures(
+        {"minecraft:oak_fence": {"block": "minecraft:oak_fence"}},
+        arrays={"block/oak_planks": np.zeros((16, 16, 4), np.uint8)},
+    )
+    quads = item_entity_quads("minecraft:oak_fence", textures)
+    assert quads is not None and len(quads) > 0
+    assert {str(k) for k in quads["texkey"]} == {"block/oak_planks"}
 
 
 def test_unknown_item_and_missing_entries_return_none():

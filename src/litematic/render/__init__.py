@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from litematic.parse.model import Litematic
-from litematic.render.entity import item_content_texkey
+from litematic.render.entity import item_content_quads
 from litematic.render.errors import RenderError
 from litematic.render.pack import load_pack
 from litematic.render.png import encode_png
@@ -164,6 +164,6 @@ def _unresolved_entities(schem: Litematic, textures) -> set[str]:
             item = ent.data.get("Item")
             item_id = item.get("id") if isinstance(item, Mapping) else None
             if isinstance(item_id, str) and item_id:
-                if item_content_texkey(item_id, textures) is None:
+                if item_content_quads(item_id, textures) is None:
                     missed.add(item_id)
     return missed

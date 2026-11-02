@@ -5,7 +5,7 @@ import pytest
 
 from litematic.render.entity import item_frame_quads
 from litematic.render.pack.resolve import Resolver
-from litematic.render.quads import QUAD_DTYPE
+from litematic.render.quads import CULL_NONE, QUAD_DTYPE, unit_cube_quads
 
 
 def _pad():
@@ -106,6 +106,57 @@ def test_frame_block_content_uses_block_texture_plate():
         textures,
     )
     assert "block/stone" in _texkeys(quads)
+
+
+def test_frame_block_content_is_half_size_mini_cube():
+    """Vanilla frame block content: 0.5 cube centered, front flush at z=15."""
+    textures = _frame_textures(
+        {"minecraft:stone": {"block": "minecraft:stone"}}
+    )
+    textures.quads_map["minecraft:stone[]"] = unit_cube_quads("block/stone")
+    quads = item_frame_quads(
+        {"facing": "north", "item_rotation": 0},
+        "minecraft:stone",
+        textures,
+    )
+    content = quads[quads["texkey"] == "block/stone"]
+    assert len(content) == 6
+    v = content["vtx"]
+    assert v[..., 0].min() == pytest.approx(4.0)
+    assert v[..., 0].max() == pytest.approx(12.0)
+    assert v[..., 1].min() == pytest.approx(4.0)
+    assert v[..., 1].max() == pytest.approx(12.0)
+    assert v[..., 2].min() == pytest.approx(7.0)
+    assert v[..., 2].max() == pytest.approx(15.0)
+    assert (content["dbl"]).all()
+    assert (content["cull"] == CULL_NONE).all()
+
+
+def test_frame_block_content_without_textures_stays_magenta():
+    """Chest class: builtin geometry whose backfill misses keeps magenta."""
+    textures = _frame_textures(
+        {"minecraft:chest": {"block": "minecraft:chest"}}
+    )
+    quads = item_frame_quads(
+        {"facing": "south", "item_rotation": 0},
+        "minecraft:chest",
+        textures,
+    )
+    assert "__magenta__" in _texkeys(quads)
+
+
+def test_frame_block_content_empty_model_stays_magenta():
+    """An elements-free pack model resolves miss=None but must not vanish."""
+    textures = _frame_textures(
+        {"minecraft:hollow": {"block": "minecraft:hollow"}}
+    )
+    textures.quads_map["minecraft:hollow[]"] = np.zeros(0, QUAD_DTYPE)
+    quads = item_frame_quads(
+        {"facing": "north", "item_rotation": 0},
+        "minecraft:hollow",
+        textures,
+    )
+    assert "__magenta__" in _texkeys(quads)
 
 
 def test_frame_unresolvable_content_renders_magenta():

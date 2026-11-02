@@ -236,3 +236,50 @@ def test_texkey_arrays_unknown_key_raises():
     resolver = _resolver()
     with pytest.raises(RenderError, match="texkey missing"):
         resolver.texkey_arrays(["block/ghost"])
+
+
+def test_representative_props_prefers_facing_north():
+    states = {
+        "minecraft:furnace": {
+            "facing=east,lit=false": {"facing": "east", "lit": "false"},
+            "facing=north,lit=true": {"facing": "north", "lit": "true"},
+            "facing=north,lit=false": {"facing": "north", "lit": "false"},
+        }
+    }
+    resolver = _resolver(states=states)
+    assert resolver.representative_props("minecraft:furnace") == {
+        "facing": "north",
+        "lit": "false",
+    }
+
+
+def test_representative_props_sorted_first_without_facing():
+    states = {
+        "minecraft:chain": {
+            "axis=x": {"axis": "x"},
+            "axis=y": {"axis": "y"},
+        }
+    }
+    resolver = _resolver(states=states)
+    assert resolver.representative_props("minecraft:chain") == {"axis": "x"}
+
+
+def test_representative_props_from_multipart_whens():
+    record = json.dumps(
+        {
+            "parts": [
+                {"when": None, "quads": "post"},
+                {"when": {"up": "true"}, "quads": "post"},
+                {"when": {"north": "low|tall"}, "quads": "arm"},
+            ]
+        }
+    )
+    resolver = _resolver(parts_map={"minecraft:cobblestone_wall": record})
+    assert resolver.representative_props("minecraft:cobblestone_wall") == {
+        "up": "true",
+        "north": "false",
+    }
+
+
+def test_representative_props_empty_for_plain_blocks():
+    assert _resolver().representative_props("minecraft:stone") == {}

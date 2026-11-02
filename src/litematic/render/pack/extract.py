@@ -275,9 +275,9 @@ def _extract_items(
     """Classify 1.21.9 item assets: block models or generated sprites.
 
     Two sources: items/<id>.json definitions (block items point straight
-    at models/block/) and models/item/<id>.json chains ending at
-    builtin/generated (flat sprites). Unresolvable or non-model types
-    stay unrecorded.
+    at models/block/, animation wrappers unwrap to their 0-frame model)
+    and models/item/<id>.json chains ending at builtin/generated (flat
+    sprites). Unresolvable items stay unrecorded.
     """
     items: dict[str, dict[str, str]] = {}
     for path in sorted(stack.names()):
@@ -286,12 +286,8 @@ def _extract_items(
         parts = path.split("/")
         ns, stem = parts[1], parts[-1][: -len(".json")]
         if len(parts) == 4 and parts[2] == "items":
-            data = _read_json(stack, path)
-            model = data.get("model") if isinstance(data, dict) else None
-            if not isinstance(model, dict) or model.get("type") != "minecraft:model":
-                continue
-            ref = model.get("model")
-            if isinstance(ref, str) and ref:
+            ref = _unwrap_item_model(_read_json(stack, path))
+            if ref:
                 _classify_item_ref(
                     ns, ref, f"{ns}:{stem}", items, stack,
                     texture_cache, tex_arrays, model_cache, budget,
@@ -308,6 +304,60 @@ def _extract_items(
     if raw is not None:
         tex_arrays.setdefault(_ARMORSTAND_TEXKEY, raw)
     return items
+
+
+_WRAPPER_DEPTH = 8
+
+
+
+def _unwrap_item_model(data: object) -> str | None:
+    """Follow select/condition/range_dispatch wrappers to one model ref.
+
+    Vanilla picks a frame at render time; the 0-frame stand-in is the
+    minimum-threshold dispatch entry, a select's first case, and a
+    condition's on_false. Special renderers have no model: unwrapping
+    stops there and the item stays unregistered.
+    """
+    node = data.get("model") if isinstance(data, dict) else None
+    for _ in range(_WRAPPER_DEPTH):
+        if not isinstance(node, dict):
+            return None
+        kind = node.get("type")
+        if kind == "minecraft:model":
+            ref = node.get("model")
+            return ref if isinstance(ref, str) and ref else None
+        if kind == "minecraft:range_dispatch":
+            raw = node.get("entries")
+            entries = (
+                [e for e in raw if isinstance(e, dict)]
+                if isinstance(raw, list)
+                else []
+            )
+            node = (
+                min(entries, key=_dispatch_threshold).get("model")
+                if entries
+                else None
+            )
+        elif kind == "minecraft:select":
+            raw = node.get("cases")
+            cases = (
+                [c for c in raw if isinstance(c, dict)]
+                if isinstance(raw, list)
+                else []
+            )
+            node = cases[0].get("model") if cases else None
+        elif kind == "minecraft:condition":
+            node = node.get("on_false")
+        else:
+            return None
+    return None
+
+
+
+def _dispatch_threshold(entry: dict[str, Any]) -> float:
+    threshold = entry.get("threshold", 0)
+    return threshold if isinstance(threshold, (int, float)) else 0.0
+
 
 
 def _classify_item_ref(
@@ -330,7 +380,7 @@ def _classify_item_ref(
     if model["elements"] is not None:
         block_id = _block_id_of_ref(ns, ref)
         if block_id is not None:
-            items[item_id] = {"block": block_id}
+            items[item_id] = {"block": _live_block_id(stack, block_id)}
         return
     if not model.get("builtin_cut"):
         return
@@ -357,6 +407,21 @@ def _block_id_of_ref(ns: str, ref: str) -> str | None:
     if not stem or "/" in stem:
         return None
     return f"{ref_ns}:{stem}"
+
+
+
+def _live_block_id(stack: PackStack, block_id: str) -> str:
+    """Map inventory-model pseudo ids to their blockstate-backed block."""
+    ns, _, stem = block_id.partition(":")
+    if not stem.endswith("_inventory"):
+        return block_id
+    names = stack.names()
+    if f"assets/{ns}/blockstates/{stem}.json" in names:
+        return block_id
+    plain = stem[: -len("_inventory")]
+    if f"assets/{ns}/blockstates/{plain}.json" in names:
+        return f"{ns}:{plain}"
+    return block_id
 
 
 def _register_direct_items(

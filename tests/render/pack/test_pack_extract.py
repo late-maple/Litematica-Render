@@ -2110,3 +2110,152 @@ def test_items_map_skips_unresolvable_and_non_model_types(tmp_path):
     data = _load_npz(_extract(tmp_path, entries))
     items = json.loads(str(data["items"].item()))
     assert items == {}
+
+
+def test_items_map_unwraps_animation_wrappers_to_zero_frame(tmp_path):
+    """select/condition/range_dispatch unwrap to the 0-frame model; special stops."""
+    entries = {
+        **_stone_entries(),
+        "assets/minecraft/items/clock.json": json.dumps(
+            {
+                "model": {
+                    "type": "minecraft:select",
+                    "cases": [
+                        {
+                            "model": {
+                                "type": "minecraft:range_dispatch",
+                                "entries": [
+                                    {
+                                        "threshold": 0.0,
+                                        "model": {
+                                            "type": "minecraft:model",
+                                            "model": "minecraft:item/clock_00",
+                                        },
+                                    },
+                                    {
+                                        "threshold": 0.5,
+                                        "model": {
+                                            "type": "minecraft:model",
+                                            "model": "minecraft:item/clock_32",
+                                        },
+                                    },
+                                ],
+                            }
+                        }
+                    ],
+                }
+            }
+        ),
+        "assets/minecraft/items/compass.json": json.dumps(
+            {
+                "model": {
+                    "type": "minecraft:condition",
+                    "on_false": {
+                        "type": "minecraft:range_dispatch",
+                        "entries": [
+                            {
+                                "threshold": 1.0,
+                                "model": {
+                                    "type": "minecraft:model",
+                                    "model": "minecraft:item/compass_32",
+                                },
+                            },
+                            {
+                                "threshold": 0.0,
+                                "model": {
+                                    "type": "minecraft:model",
+                                    "model": "minecraft:item/compass_16",
+                                },
+                            },
+                        ],
+                    },
+                }
+            }
+        ),
+        "assets/minecraft/items/shield.json": json.dumps(
+            {
+                "model": {
+                    "type": "minecraft:condition",
+                    "on_false": {
+                        "type": "minecraft:special",
+                        "base": "minecraft:item/shield",
+                    },
+                }
+            }
+        ),
+        "assets/minecraft/models/item/clock_00.json": json.dumps(
+            {
+                "parent": "minecraft:item/generated",
+                "textures": {"layer0": "minecraft:item/clock_00"},
+            }
+        ),
+        "assets/minecraft/models/item/compass_16.json": json.dumps(
+            {
+                "parent": "minecraft:item/generated",
+                "textures": {"layer0": "minecraft:item/compass_16"},
+            }
+        ),
+        "assets/minecraft/models/item/generated.json": json.dumps(
+            {"parent": "builtin/generated"}
+        ),
+        "assets/minecraft/textures/item/clock_00.png": _solid_png(
+            (200, 180, 40, 255)
+        ),
+        "assets/minecraft/textures/item/compass_16.png": _solid_png(
+            (120, 120, 200, 255)
+        ),
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    items = json.loads(str(data["items"].item()))
+    assert items["minecraft:clock"] == {"flat": "item/clock_00"}
+    assert items["minecraft:compass"] == {"flat": "item/compass_16"}
+    assert "minecraft:shield" not in items
+
+
+def test_items_map_inventory_models_fall_back_to_live_block(tmp_path):
+    """*_inventory item models register their blockstate-backed block."""
+    entries = {
+        **_stone_entries(),
+        "assets/minecraft/blockstates/cobblestone_wall.json": _blockstates(
+            "minecraft:block/cobblestone_wall_post"
+        ),
+        "assets/minecraft/items/cobblestone_wall.json": json.dumps(
+            {
+                "model": {
+                    "type": "minecraft:model",
+                    "model": "minecraft:block/cobblestone_wall_inventory",
+                }
+            }
+        ),
+        "assets/minecraft/models/block/cobblestone_wall_inventory.json":
+            json.dumps({"elements": []}),
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    items = json.loads(str(data["items"].item()))
+    assert items["minecraft:cobblestone_wall"] == {
+        "block": "minecraft:cobblestone_wall"
+    }
+
+
+def test_items_map_keeps_inventory_ids_with_own_blockstate(tmp_path):
+    entries = {
+        **_stone_entries(),
+        "assets/minecraft/blockstates/fake_inventory.json": _blockstates(
+            "minecraft:block/stone"
+        ),
+        "assets/minecraft/items/fake_inventory.json": json.dumps(
+            {
+                "model": {
+                    "type": "minecraft:model",
+                    "model": "minecraft:block/fake_inventory",
+                }
+            }
+        ),
+        "assets/minecraft/models/block/fake_inventory.json":
+            json.dumps({"elements": []}),
+    }
+    data = _load_npz(_extract(tmp_path, entries))
+    items = json.loads(str(data["items"].item()))
+    assert items["minecraft:fake_inventory"] == {
+        "block": "minecraft:fake_inventory"
+    }
