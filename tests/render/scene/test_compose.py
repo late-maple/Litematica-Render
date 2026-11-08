@@ -23,7 +23,7 @@ from litematic.render.quads import (
 )
 from litematic.render.scene import isometric as isometric_mod
 from litematic.render.scene.isometric import _compose as _compose_view
-from litematic.render.scene.isometric import _vertex_ao
+from litematic.render.scene.isometric import _fill, _prepare, _vertex_ao
 from litematic.render.scene.view import ISO_SLANT_DEG, ViewAxes
 from litematic.render.shapes import builtin_quads
 
@@ -1188,3 +1188,32 @@ def test_span_survives_axis_ulp_noise(monkeypatch):
     schem = _schematic([("Main", (0, 0, 0), (2, 1, 1), palette, indices)])
     scene = _compose(schem, 0, _textures(True))
     assert (scene.span_w, scene.span_h) == (7, 6)
+
+
+def _assert_scenes_identical(a, b):
+    """Bitwise scene equality: every column, spans, texkeys, camera."""
+    assert (a.span_w, a.span_h) == (b.span_w, b.span_h)
+    for name in (
+        "x", "y", "z", "quad_vtx", "quad_uv", "quad_ao",
+        "quad_shade", "quad_dbl", "texkey_ids",
+    ):
+        assert getattr(a, name).tobytes() == getattr(b, name).tobytes(), name
+    assert set(a.texkeys) == set(b.texkeys)
+    for key in a.texkeys:
+        assert a.texkeys[key].tobytes() == b.texkeys[key].tobytes(), key
+    assert a.axes.tiers == b.axes.tiers
+    for name in ("right", "up", "toward"):
+        assert getattr(a.axes, name).tobytes() == getattr(b.axes, name).tobytes()
+
+
+def test_preparation_reusable_across_views():
+    palette = [("minecraft:air", {}), ("minecraft:stone", {})]
+    indices = np.array([1, 1], dtype=np.uint16)
+    schem = _schematic([("Main", (0, 0, 0), (2, 1, 1), palette, indices)])
+    textures = _textures(True)
+    prep = _prepare(schem, textures, True)
+    # Three views spanning distinct tier sets, including a negative slant.
+    for rotation, slant in ((45.0, ISO_SLANT_DEG), (135.0, 25.0), (160.0, -20.0)):
+        filled = _fill(prep, rotation, slant)
+        serial = _compose_view(schem, rotation, slant, textures, True)
+        _assert_scenes_identical(filled, serial)

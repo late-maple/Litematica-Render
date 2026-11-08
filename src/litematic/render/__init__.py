@@ -10,13 +10,23 @@ from litematic.render.entity import item_content_quads
 from litematic.render.errors import RenderError
 from litematic.render.pack import load_pack
 from litematic.render.png import encode_png
-from litematic.render.scene.isometric import _AIR_NAMES, _compose
+from litematic.render.scene.isometric import (
+    _AIR_NAMES,
+    _compose,
+    _compose_guarded,
+    _fill,
+    _prepare,
+    _Scene,
+    _scene_for_view,
+)
 from litematic.render.scene.painter import _choose_scale, _downsample, _paint
 from litematic.render.scene.view import ISO_SLANT_DEG, view_axes
 
 __all__ = [
     "RenderError",
     "isometric",
+    "isometric_batch",
+    "isometric_batch_png",
     "isometric_png",
     "to_png",
     "unresolved_colors",
@@ -39,18 +49,7 @@ def isometric(
     background: tuple[int, int, int, int] | None = None,
 ) -> np.ndarray:
     """Render a schematic to an RGBA isometric image within max_size."""
-    if not _MAX_SIZE_BOUNDS[0] <= max_size <= _MAX_SIZE_BOUNDS[1]:
-        raise RenderError(
-            f"render: max_size must be "
-            f"{_MAX_SIZE_BOUNDS[0]}-{_MAX_SIZE_BOUNDS[1]}, got {max_size}"
-        )
-    if not _SS_BOUNDS[0] <= supersample <= _SS_BOUNDS[1]:
-        raise RenderError(
-            f"render: supersample must be "
-            f"{_SS_BOUNDS[0]}-{_SS_BOUNDS[1]}, got {supersample}"
-        )
-    if not isinstance(entities, bool):
-        raise RenderError(f"render: entities must be a boolean, got {entities!r}")
+    _check_render_params(max_size, supersample, entities)
     # Validate angles before any pack work so bad views fail fast.
     view_axes(rotation, slant)
     bg = _background(background)
@@ -58,15 +57,7 @@ def isometric(
     scene = _compose(schem, rotation, slant, textures, entities)
     if len(scene.x) == 0:
         raise RenderError("render: no blocks to render")
-    t, _ = _choose_scale(scene.span_w, scene.span_h, max_size, supersample)
-    img = _paint(scene, t, bg)
-    height, width = img.shape[:2]
-    if max(height, width) > max_size:
-        factor = max_size / max(height, width)
-        img = _downsample(
-            img, max(1, round(width * factor)), max(1, round(height * factor))
-        )
-    return img
+    return _render_scene(scene, max_size, supersample, bg)
 
 
 def isometric_png(
@@ -95,6 +86,115 @@ def isometric_png(
             background=background,
         )
     )
+
+
+def isometric_batch(
+    schem: Litematic,
+    *,
+    views: Sequence[tuple[float, float]],
+    textures_path: str | Path | None = None,
+    extra_packs: Sequence[str | Path] = (),
+    entities: bool = True,
+    max_size: int = 2048,
+    supersample: int = 2,
+    background: tuple[int, int, int, int] | None = None,
+) -> list[np.ndarray]:
+    """Render several views, each identical to its serial isometric() call."""
+    return _batch_frames(
+        schem,
+        views,
+        textures_path=textures_path,
+        extra_packs=extra_packs,
+        entities=entities,
+        max_size=max_size,
+        supersample=supersample,
+        background=background,
+    )
+
+
+def isometric_batch_png(
+    schem: Litematic,
+    *,
+    views: Sequence[tuple[float, float]],
+    textures_path: str | Path | None = None,
+    extra_packs: Sequence[str | Path] = (),
+    entities: bool = True,
+    max_size: int = 2048,
+    supersample: int = 2,
+    background: tuple[int, int, int, int] | None = None,
+) -> list[bytes]:
+    """Render several views and encode each frame as PNG bytes."""
+    frames = _batch_frames(
+        schem,
+        views,
+        textures_path=textures_path,
+        extra_packs=extra_packs,
+        entities=entities,
+        max_size=max_size,
+        supersample=supersample,
+        background=background,
+    )
+    encoded: dict[int, bytes] = {}
+    pngs: list[bytes] = []
+    for frame in frames:
+        key = id(frame)
+        # Duplicate views share one frame object, so they encode once.
+        if key not in encoded:
+            encoded[key] = encode_png(frame)
+        pngs.append(encoded[key])
+    return pngs
+
+
+def _batch_frames(
+    schem: Litematic,
+    views: Sequence[tuple[float, float]],
+    *,
+    textures_path: str | Path | None,
+    extra_packs: Sequence[str | Path],
+    entities: bool,
+    max_size: int,
+    supersample: int,
+    background: tuple[int, int, int, int] | None,
+) -> list[np.ndarray]:
+    """Validate every view, then render them on one shared preparation."""
+    try:
+        view_list = list(views)
+    except TypeError:
+        raise RenderError(
+            f"render: views must be a sequence of (rotation, slant) pairs, "
+            f"got {views!r}"
+        ) from None
+    if not view_list:
+        raise RenderError("render: views must not be empty")
+    _check_render_params(max_size, supersample, entities)
+    checked: list[tuple[float, float]] = []
+    for entry in view_list:
+        try:
+            rotation, slant = entry
+        except (TypeError, ValueError):
+            raise RenderError(
+                f"render: views entries must be (rotation, slant) pairs, "
+                f"got {entry!r}"
+            ) from None
+        view_axes(rotation, slant)
+        checked.append((rotation, slant))
+    bg = _background(background)
+    textures = load_pack(_require_pack(textures_path), extra_packs)
+    prep = _compose_guarded(_prepare, schem, textures, entities)
+    groups: dict[tuple[int, ...], list[tuple[float, float]]] = {}
+    for key in dict.fromkeys(checked):
+        groups.setdefault(view_axes(*key).tiers, []).append(key)
+    frames: dict[tuple[float, float], np.ndarray] = {}
+    for group in groups.values():
+        scene = _compose_guarded(_fill, prep, *group[0])
+        if len(scene.x) == 0:
+            raise RenderError("render: no blocks to render")
+        for key in group:
+            frames[key] = _render_scene(
+                _scene_for_view(scene, *key), max_size, supersample, bg
+            )
+        del scene
+    return [frames[key] for key in checked]
 
 
 def to_png(image: np.ndarray) -> bytes:
@@ -126,6 +226,40 @@ def unresolved_colors(
     if entities:
         missed |= _unresolved_entities(schem, textures)
     return missed
+
+
+def _check_render_params(max_size: int, supersample: int, entities: bool) -> None:
+    """Validate the shared render options shared by serial and batch."""
+    if not _MAX_SIZE_BOUNDS[0] <= max_size <= _MAX_SIZE_BOUNDS[1]:
+        raise RenderError(
+            f"render: max_size must be "
+            f"{_MAX_SIZE_BOUNDS[0]}-{_MAX_SIZE_BOUNDS[1]}, got {max_size}"
+        )
+    if not _SS_BOUNDS[0] <= supersample <= _SS_BOUNDS[1]:
+        raise RenderError(
+            f"render: supersample must be "
+            f"{_SS_BOUNDS[0]}-{_SS_BOUNDS[1]}, got {supersample}"
+        )
+    if not isinstance(entities, bool):
+        raise RenderError(f"render: entities must be a boolean, got {entities!r}")
+
+
+def _render_scene(
+    scene: _Scene,
+    max_size: int,
+    supersample: int,
+    bg: tuple[int, int, int, int],
+) -> np.ndarray:
+    """Paint one composed scene and fit the image inside max_size."""
+    t, _ = _choose_scale(scene.span_w, scene.span_h, max_size, supersample)
+    img = _paint(scene, t, bg)
+    height, width = img.shape[:2]
+    if max(height, width) > max_size:
+        factor = max_size / max(height, width)
+        img = _downsample(
+            img, max(1, round(width * factor)), max(1, round(height * factor))
+        )
+    return img
 
 
 def _background(

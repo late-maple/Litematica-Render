@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from litematic.parse.model import Litematic
+from litematic.parse.model import Litematic, Region
 from litematic.render.entity import (
     armor_stand_quads,
     entity_props,
@@ -110,6 +110,16 @@ def _new_arena(capacity: int) -> _Arena:
     )
 
 
+def _compose_guarded(fn, *args):
+    """Run one composition step, wrapping unexpected failures."""
+    try:
+        return fn(*args)
+    except RenderError:
+        raise
+    except Exception as exc:
+        raise RenderError(f"compose: scene composition failed: {exc}") from exc
+
+
 def _compose(
     schem: Litematic,
     rotation: float,
@@ -118,74 +128,91 @@ def _compose(
     entities: bool = True,
 ) -> _Scene:
     """Collect visible blocks and entities from all regions into a scene."""
-    try:
-        return _compose_inner(schem, rotation, slant, textures, entities)
-    except RenderError:
-        raise
-    except Exception as exc:
-        raise RenderError(f"compose: scene composition failed: {exc}") from exc
+    return _compose_guarded(
+        _compose_inner, schem, rotation, slant, textures, entities
+    )
 
 
-def _compose_inner(
-    schem: Litematic,
-    rotation: float,
-    slant: float,
-    textures: Resolver,
-    entities: bool,
-) -> _Scene:
-    """Expand every region's visible cells into camera-filtered quads.
+class _Prep(NamedTuple):
+    """Angle-independent composition work, reusable across views."""
 
-    Pass A stashes per-slab visible cells and counts the exact
-    camera-facing quad total; pass B expands each slab straight into the
-    preallocated arena through a rolling occlusion window, so no
-    intermediate list of slab pieces is ever held.
-    """
-    axes = view_axes(rotation, slant)
-    tier_visible = np.zeros(6, bool)
-    tier_visible[list(axes.tiers)] = True
+    plan: list[tuple[Region, _Luts, list]]  # per drawable region
+    entity_rows: tuple | None  # compiled entity scene-column rows
+    key_arrays: dict[str, np.ndarray]  # texkey string -> (h, w, 4) array
+
+
+def _prepare(
+    schem: Litematic, textures: Resolver, entities: bool = True
+) -> _Prep:
+    """Resolve palettes, stash visible slabs, and compile entity rows."""
     key_ids: dict[str, int] = {}
     key_arrays: dict[str, np.ndarray] = {}
     plan = []
-    capacity = 0
     for name in sorted(schem.regions):
         region = schem.regions[name]
         luts = _palette_luts(region.palette, textures, key_ids, key_arrays)
         if luts.pool is None:
             continue
+        plan.append((region, luts, list(_visible_slabs(region, luts))))
+    entity_rows = (
+        _entity_rows(schem, textures, key_ids, key_arrays) if entities else None
+    )
+    return _Prep(plan, entity_rows, key_arrays)
+
+
+def _projected_spans(
+    x: np.ndarray, y: np.ndarray, z: np.ndarray, vtx: np.ndarray, axes: ViewAxes
+) -> tuple[int, int]:
+    """Canvas spans in pixels at scale 1 for this camera."""
+    c0, c1, r0, r1 = project_bounds(x, y, z, vtx, axes)
+    return (
+        int(math.ceil(c1 - c0 - _SPAN_SNAP)) + 1,
+        int(math.ceil(r1 - r0 - _SPAN_SNAP)) + 1,
+    )
+
+
+def _scene_for_view(scene: _Scene, rotation: float, slant: float) -> _Scene:
+    """Re-aim a composed scene at another view of the same tier set."""
+    axes = view_axes(rotation, slant)
+    span_w, span_h = _projected_spans(
+        scene.x, scene.y, scene.z, scene.quad_vtx, axes
+    )
+    return scene._replace(axes=axes, span_w=span_w, span_h=span_h)
+
+
+def _fill(prep: _Prep, rotation: float, slant: float) -> _Scene:
+    """Expand the prepared plan into camera-facing quads for one view."""
+    axes = view_axes(rotation, slant)
+    tier_visible = np.zeros(6, bool)
+    tier_visible[list(axes.tiers)] = True
+    entity_count = 0 if prep.entity_rows is None else len(prep.entity_rows[0])
+    capacity = 0
+    for region, luts, stash in prep.plan:
         cam_rows = _camera_row_counts(luts, tier_visible)
-        stash = list(_visible_slabs(region, luts))
         capacity += sum(
             int(cam_rows[picked.astype(np.int64)].sum())
             for (*_, picked) in stash
         )
-        plan.append((region, luts, stash))
-    entity_rows = (
-        _entity_rows(schem, textures, key_ids, key_arrays) if entities else None
-    )
-    entity_count = 0 if entity_rows is None else len(entity_rows[0])
     if capacity + entity_count == 0:
         return _empty_scene()
     arena = _new_arena(capacity + entity_count)
     written = 0
-    for region, luts, stash in plan:
+    for region, luts, stash in prep.plan:
         px, py, pz = region.position.x, region.position.y, region.position.z
         for y0, y1, lx, ly, lz, picked in stash:
             written += _expand_slab_into(
                 arena, written, y0, y1, lx, ly, lz, picked,
                 luts, region, tier_visible, (px, py, pz),
             )
-        stash.clear()
-    if entity_rows is not None:
-        written += _write_entity_rows(arena, written, entity_rows)
+    if prep.entity_rows is not None:
+        written += _write_entity_rows(arena, written, prep.entity_rows)
     x = arena.x[:written]
     y = arena.y[:written]
     z = arena.z[:written]
     x = x - int(x.min())
     y = y - int(y.min())
     z = z - int(z.min())
-    c0, c1, r0, r1 = project_bounds(x, y, z, arena.vtx[:written], axes)
-    span_w = int(math.ceil(c1 - c0 - _SPAN_SNAP)) + 1
-    span_h = int(math.ceil(r1 - r0 - _SPAN_SNAP)) + 1
+    span_w, span_h = _projected_spans(x, y, z, arena.vtx[:written], axes)
     return _Scene(
         x.astype(np.int32),
         y.astype(np.int32),
@@ -196,11 +223,22 @@ def _compose_inner(
         arena.shade[:written].copy(),
         arena.dbl[:written].copy(),
         arena.texkey[:written].copy(),
-        dict(key_arrays),
+        dict(prep.key_arrays),
         span_w,
         span_h,
         axes,
     )
+
+
+def _compose_inner(
+    schem: Litematic,
+    rotation: float,
+    slant: float,
+    textures: Resolver,
+    entities: bool,
+) -> _Scene:
+    """Prepare the angle-independent work, then fill for this view."""
+    return _fill(_prepare(schem, textures, entities), rotation, slant)
 
 
 def _entity_rows(
